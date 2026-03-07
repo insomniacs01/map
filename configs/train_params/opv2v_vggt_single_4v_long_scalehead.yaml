@@ -1,0 +1,61 @@
+defaults:
+  - default
+
+# Long OPV2V single-agent (4 cameras) VGGT finetuning WITH metric scale head.
+
+# Keep per-GPU batch=1 (4 views) on a 40GB A800 slice; use grad accumulation.
+max_num_of_imgs_per_gpu: 4
+accum_iter: 4
+epochs: 30
+warmup_epochs: 2
+
+lr: 1e-05
+min_lr: 1e-07
+
+keep_freq: 5
+save_freq: 1
+eval_freq: 1
+print_freq: 20
+
+submodule_configs:
+  metric_scale_head:
+    lr: 3e-04
+    min_lr: 3e-06
+    warmup_epochs: ${train_params.warmup_epochs}
+    weight_decay: ${train_params.weight_decay}
+    schedule_type: ${train_params.schedule_type}
+  model.aggregator.patch_embed:
+    lr: 5e-07
+    min_lr: 5e-09
+    warmup_epochs: ${train_params.warmup_epochs}
+    weight_decay: ${train_params.weight_decay}
+    schedule_type: ${train_params.schedule_type}
+  model.aggregator:
+    lr: 1e-06
+    min_lr: 1e-08
+    warmup_epochs: ${train_params.warmup_epochs}
+    weight_decay: ${train_params.weight_decay}
+    schedule_type: ${train_params.schedule_type}
+  model.camera_head:
+    lr: 2e-05
+    min_lr: 2e-07
+    warmup_epochs: ${train_params.warmup_epochs}
+    weight_decay: ${train_params.weight_decay}
+    schedule_type: ${train_params.schedule_type}
+  model.depth_head:
+    lr: 2e-05
+    min_lr: 2e-07
+    warmup_epochs: ${train_params.warmup_epochs}
+    weight_decay: ${train_params.weight_decay}
+    schedule_type: ${train_params.schedule_type}
+  model.point_head:
+    lr: 0
+  model.track_head:
+    lr: 0
+
+# Prefer non-flash SDPA backends for stability on some A800 driver/kernel combos.
+sdpa:
+  enable_flash: false
+  enable_math: true
+  enable_mem_efficient: true
+  enable_cudnn: true

@@ -1,0 +1,47 @@
+enabled: true
+
+# Stop gradient from det loss into MapAnything points (det head-only finetune).
+stop_gradient: true
+
+# Do not use the predicted non-ambiguous mask as weights; OPV2V vehicles can be ambiguous.
+use_pred_mask: false
+
+# Weight BEV splatting by the predicted per-pixel confidence to downweight noisy points.
+use_pred_conf: true
+conf_clip: 10.0
+conf_power: 2.0
+
+# Filter points by height in ego CARLA/UE coordinates to suppress ground/sky clutter.
+# Set to null to disable.
+point_z_min: -1.0
+point_z_max: 3.0
+
+# Use GT camera poses to align camera-frame points to ego for BEV rasterization.
+point_pose_source: gt
+
+# BEV grid settings (ego CARLA/UE: X forward, Y right).
+x_range: [-50.0, 120.0]
+y_range: [-50.0, 50.0]
+voxel_size: 0.5
+
+# Point subsampling
+max_points: 200000
+
+# Extra BEV channels to reduce false positives on flat ground regions.
+include_high_ratio: true
+z_high_threshold: 0.5
+include_var_z: true
+
+# Head capacity
+hidden_channels: 128
+num_conv: 4
+
+# Lower initial objectness to avoid dense early predictions.
+heatmap_bias: -4.0
+
+# Gating: suppress heatmap in regions with very low local height variance.
+heatmap_support_gate: true
+support_kernel: 5
+support_var_z_tau: 0.1
+support_detach: true
+

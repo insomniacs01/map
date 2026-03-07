@@ -1,0 +1,11 @@
+defaults:
+  - default
+
+root_data_dir: /media/tsinghua3090/8626b953-db6f-4e02-b531-fceb130612da/home
+mapanything_dataset_metadata_dir: /home/qqxluca/map-anything-metadata
+root_pretrained_checkpoints_dir: /home/qqxluca/map-anything3/checkpoints
+root_experiments_dir: /home/qqxluca/map-anything3/experiments
+root_uniception_pretrained_checkpoints_dir: /home/qqxluca/map-anything3/uniception_checkpoints
+external_benchmark_data_root_data_dir: /home/qqxluca/map-anything3/external_benchmark_data
+opv2v_images_root: /media/tsinghua3090/8626b953-db6f-4e02-b531-fceb130612da/home/OPV2V
+opv2v_depth_root: /media/tsinghua3090/8626b953-db6f-4e02-b531-fceb130612da/home/opv2v_depth

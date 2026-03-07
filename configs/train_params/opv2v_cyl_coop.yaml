@@ -1,0 +1,13 @@
+defaults:
+  - default
+
+max_num_of_imgs_per_gpu: 4
+accum_iter: 1
+epochs: 30
+warmup_epochs: 2
+lr: 5e-05
+min_lr: 5e-07
+keep_freq: 5
+save_freq: 1
+eval_freq: 1
+print_freq: 20

@@ -1,0 +1,9 @@
+# Detection-only loss for OPV2V with stronger hard-negative mining.
+#
+# Goal: suppress high-score background peaks while keeping positive centers.
+# - Keep focal(alpha=1,beta=4) + strong heatmap weight.
+# - Increase hard-neg topK and weight.
+# - Slightly tighter gaussian support to reduce broad heat blobs.
+
+train_criterion: "BEVCenternetDetLoss(x_range=(-50.0, 120.0), y_range=(-50.0, 50.0), voxel_size=0.5, heatmap_weight=4.0, reg_weight=1.0, focal_alpha=1.0, focal_beta=4.0, min_gaussian_radius=1, max_gaussian_radius=6, hard_neg_topk=500, hard_neg_weight=0.5, hard_neg_ignore_tgt=0.1)"
+test_criterion: "BEVCenternetDetLoss(x_range=(-50.0, 120.0), y_range=(-50.0, 50.0), voxel_size=0.5, heatmap_weight=4.0, reg_weight=1.0, focal_alpha=1.0, focal_beta=4.0, min_gaussian_radius=1, max_gaussian_radius=6, hard_neg_topk=500, hard_neg_weight=0.5, hard_neg_ignore_tgt=0.1)"

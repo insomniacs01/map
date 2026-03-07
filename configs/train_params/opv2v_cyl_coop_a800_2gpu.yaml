@@ -1,0 +1,71 @@
+defaults:
+  - default
+
+# High-throughput OPV2V cylindrical cooperative finetuning for 2x A800 (80GB).
+# With num_views=4 and max_num_of_imgs_per_gpu=16, max batch size is 4 samples / GPU,
+# and 40_000 resized samples -> 5,000 steps / epoch on 2 GPUs.
+max_num_of_imgs_per_gpu: 16
+accum_iter: 1
+
+epochs: 10
+warmup_epochs: 1
+
+lr: 5e-05
+min_lr: 5e-07
+
+save_freq: 1
+keep_freq: 2
+# Skip built-in validation to avoid stalling throughput; use scripts/eval_opv2v_cyl_metrics.py instead.
+eval_freq: 999
+print_freq: 20
+
+# Fixed resolution -> enable CUDNN autotuning for speed.
+disable_cudnn_benchmark: false
+
+# Finetune heads + geometry while freezing the DINOv2 encoder.
+submodule_configs:
+  encoder:
+    lr: 0
+
+  info_sharing:
+    lr: ${train_params.lr}
+    min_lr: ${train_params.min_lr}
+  dpt_feature_head:
+    lr: ${train_params.lr}
+    min_lr: ${train_params.min_lr}
+  dpt_regressor_head:
+    lr: ${train_params.lr}
+    min_lr: ${train_params.min_lr}
+
+  pose_head:
+    lr: ${train_params.lr}
+    min_lr: ${train_params.min_lr}
+  pose_adaptor:
+    lr: ${train_params.lr}
+    min_lr: ${train_params.min_lr}
+
+  scale_head:
+    lr: ${train_params.lr}
+    min_lr: ${train_params.min_lr}
+  scale_adaptor:
+    lr: ${train_params.lr}
+    min_lr: ${train_params.min_lr}
+
+  ray_dirs_encoder:
+    lr: ${train_params.lr}
+    min_lr: ${train_params.min_lr}
+  depth_encoder:
+    lr: ${train_params.lr}
+    min_lr: ${train_params.min_lr}
+  depth_scale_encoder:
+    lr: ${train_params.lr}
+    min_lr: ${train_params.min_lr}
+  cam_rot_encoder:
+    lr: ${train_params.lr}
+    min_lr: ${train_params.min_lr}
+  cam_trans_encoder:
+    lr: ${train_params.lr}
+    min_lr: ${train_params.min_lr}
+  cam_trans_scale_encoder:
+    lr: ${train_params.lr}
+    min_lr: ${train_params.min_lr}

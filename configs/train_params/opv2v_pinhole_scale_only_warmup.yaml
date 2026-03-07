@@ -1,0 +1,57 @@
+defaults:
+  - default
+
+# Scale-only warmup (freeze everything except scale head/adaptor)
+max_num_of_imgs_per_gpu: 6
+accum_iter: 1
+
+epochs: 2
+warmup_epochs: 1
+
+lr: 1e-4
+min_lr: 1e-6
+weight_decay: 0.0
+
+save_freq: 1
+keep_freq: 1
+eval_freq: 1
+print_freq: 20
+
+submodule_configs:
+  encoder:
+    lr: 0
+  info_sharing:
+    lr: 0
+  dpt_feature_head:
+    lr: 0
+  dpt_regressor_head:
+    lr: 0
+  ray_dirs_encoder:
+    lr: 0
+  depth_encoder:
+    lr: 0
+  depth_scale_encoder:
+    lr: 0
+  cam_rot_encoder:
+    lr: 0
+  cam_trans_encoder:
+    lr: 0
+  cam_trans_scale_encoder:
+    lr: 0
+  pose_head:
+    lr: 0
+  pose_adaptor:
+    lr: 0
+  fusion_norm_layer:
+    lr: 0
+  scale_token:
+    lr: 0
+
+  scale_head:
+    lr: ${train_params.lr}
+    min_lr: ${train_params.min_lr}
+    weight_decay: 0.0
+  scale_adaptor:
+    lr: ${train_params.lr}
+    min_lr: ${train_params.min_lr}
+    weight_decay: 0.0

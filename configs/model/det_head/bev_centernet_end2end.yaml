@@ -1,0 +1,20 @@
+enabled: true
+
+# Allow detection loss to backprop into MapAnything points (end-to-end finetuning).
+stop_gradient: false
+
+# If true, uses predicted non-ambiguous mask as point weights.
+use_pred_mask: true
+
+# BEV grid settings (ego CARLA/UE: X forward, Y right).
+x_range: [0.0, 120.0]
+y_range: [-50.0, 50.0]
+voxel_size: 0.5
+
+# Randomly subsample points before rasterization (0 or negative => keep all).
+max_points: 200000
+
+# Head capacity
+hidden_channels: 64
+num_conv: 3
+

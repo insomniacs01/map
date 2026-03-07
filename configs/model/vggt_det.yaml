@@ -1,0 +1,42 @@
+defaults:
+  - det_head: bev_centernet
+
+# String for model factory
+model_str: "vggt_det"
+
+# Model config
+model_config:
+  name: "vggt_det"
+  # Optional: warm-start from a MapAnything checkpoint (loads state_dict under key "model").
+  pretrained_checkpoint_path: null
+  # Load pre-trained weights
+  load_pretrained_weights: true
+  # Load custom checkpoint
+  load_custom_ckpt: false
+  # Custom checkpoint path
+  custom_ckpt_path: null
+  # Autocast dtype used inside VGGT forward ("auto" | "bf16" | "fp16" | "fp32").
+  autocast_dtype: "auto"
+  # Optional: learn a metric scale factor (outputs `metric_scaling_factor`).
+  enable_metric_scale_head: false
+  # Enable causal masking for temporal streaming behavior.
+  causal_global_attention: false
+  causal_camera_attention: false
+  # Metric scale head settings
+  metric_scale_head_type: "mlp"
+  metric_scale_mode: "exp"
+  metric_scale_clamp_min: 1e-6
+  metric_scale_clamp_max: 1e6
+  metric_scale_head_hidden_dim: null
+  # BEV detection head config (shared with MapAnythingDet).
+  det_head_config: ${model.det_head}
+
+# Image Normalization Type
+data_norm_type: "identity"
+
+# VGGT checkpoint is already loaded in the inference wrapper
+pretrained: null
+
+# Torch hub force reload
+torch_hub_force_reload: false
+

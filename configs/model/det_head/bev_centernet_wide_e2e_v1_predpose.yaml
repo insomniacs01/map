@@ -1,0 +1,32 @@
+enabled: true
+
+# Allow detection loss to backprop into MapAnything points (end-to-end finetuning).
+stop_gradient: false
+
+# Do not use the predicted non-ambiguous mask as weights by default.
+use_pred_mask: false
+
+# Use MapAnything-predicted poses/points for BEV rasterization (deployment-like).
+# This makes det AP sensitive to cross-agent pose / scale quality when GT extrinsics are not provided.
+point_pose_source: pred
+
+# BEV grid settings (ego CARLA/UE: X forward, Y right).
+x_range: [-50.0, 120.0]
+y_range: [-50.0, 50.0]
+voxel_size: 0.5
+
+# Randomly subsample points before rasterization (0 or negative => keep all).
+max_points: 200000
+
+# Extra BEV channels to help suppress flat-ground false positives.
+include_high_ratio: true
+z_high_threshold: 0.5
+include_var_z: true
+
+# Head capacity
+hidden_channels: 128
+num_conv: 4
+
+# Lower initial objectness to avoid dense early predictions.
+heatmap_bias: -4.0
+

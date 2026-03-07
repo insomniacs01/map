@@ -1,0 +1,63 @@
+defaults:
+  - default
+
+# Pose-only warmup from a scale-improved checkpoint.
+# Freeze geometry/scale branches and only update pose path modules.
+max_num_of_imgs_per_gpu: 6
+accum_iter: 1
+
+epochs: 1
+warmup_epochs: 0
+
+lr: 5e-6
+min_lr: 1e-6
+weight_decay: 0.0
+
+save_freq: 1
+keep_freq: 1
+eval_freq: 1
+print_freq: 20
+
+submodule_configs:
+  encoder:
+    lr: 0
+  info_sharing:
+    lr: 0
+  dpt_feature_head:
+    lr: 0
+  dpt_regressor_head:
+    lr: 0
+  ray_dirs_encoder:
+    lr: 0
+  depth_encoder:
+    lr: 0
+  depth_scale_encoder:
+    lr: 0
+  cam_rot_encoder:
+    lr: ${train_params.lr}
+    min_lr: ${train_params.min_lr}
+    weight_decay: 0.0
+  cam_trans_encoder:
+    lr: ${train_params.lr}
+    min_lr: ${train_params.min_lr}
+    weight_decay: 0.0
+  cam_trans_scale_encoder:
+    lr: 0
+  pose_head:
+    lr: ${train_params.lr}
+    min_lr: ${train_params.min_lr}
+    weight_decay: 0.0
+  pose_adaptor:
+    lr: ${train_params.lr}
+    min_lr: ${train_params.min_lr}
+    weight_decay: 0.0
+  fusion_norm_layer:
+    lr: ${train_params.lr}
+    min_lr: ${train_params.min_lr}
+    weight_decay: 0.0
+  scale_token:
+    lr: 0
+  scale_head:
+    lr: 0
+  scale_adaptor:
+    lr: 0

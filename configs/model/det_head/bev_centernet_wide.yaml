@@ -1,0 +1,27 @@
+enabled: true
+
+# If true, stops gradient from detection loss back into MapAnything points.
+stop_gradient: true
+
+# If true, uses predicted non-ambiguous mask as point weights.
+# For OPV2V, this can suppress vehicle points early in finetuning, so default to false.
+use_pred_mask: false
+
+# Which pose to use when converting predicted camera-frame points to world/ego for BEV rasterization.
+# - gt: use input `camera_pose` (recommended for OPV2V where ego poses are known)
+# - pred: use model-predicted pose (can be unstable during finetuning)
+point_pose_source: gt
+
+# BEV grid settings (ego CARLA/UE: X forward, Y right).
+# Cover negative X to include vehicles behind ego.
+x_range: [-50.0, 120.0]
+y_range: [-50.0, 50.0]
+voxel_size: 0.5
+
+# Randomly subsample points before rasterization (0 or negative => keep all).
+max_points: 200000
+
+# Head capacity
+hidden_channels: 96
+num_conv: 4
+

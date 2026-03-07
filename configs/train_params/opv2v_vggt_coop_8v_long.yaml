@@ -1,0 +1,64 @@
+defaults:
+  - default
+
+# Long OPV2V cooperative VGGT finetuning (8 views/sample).
+# Emphasis: improve pose+depth accuracy in metric scale.
+
+# Cooperative (8 views) is even heavier; keep batch=1 (8 views) and accumulate.
+max_num_of_imgs_per_gpu: 8
+accum_iter: 2
+epochs: 30
+warmup_epochs: 2
+
+lr: 1e-05
+min_lr: 1e-07
+
+keep_freq: 5
+save_freq: 1
+eval_freq: 1
+print_freq: 20
+eval_batch_size: 1
+
+# Submodule-specific learning rates.
+# - Fine-tune heads faster.
+# - Fine-tune aggregator very conservatively (domain adaptation helps pose).
+submodule_configs:
+  # DINOv2 backbone inside VGGT aggregator
+  model.aggregator.patch_embed:
+    lr: 5e-07
+    min_lr: 5e-09
+    warmup_epochs: ${train_params.warmup_epochs}
+    weight_decay: ${train_params.weight_decay}
+    schedule_type: ${train_params.schedule_type}
+  model.aggregator:
+    lr: 1e-06
+    min_lr: 1e-08
+    warmup_epochs: ${train_params.warmup_epochs}
+    weight_decay: ${train_params.weight_decay}
+    schedule_type: ${train_params.schedule_type}
+  model.camera_head:
+    lr: 2e-05
+    min_lr: 2e-07
+    warmup_epochs: ${train_params.warmup_epochs}
+    weight_decay: ${train_params.weight_decay}
+    schedule_type: ${train_params.schedule_type}
+  model.depth_head:
+    lr: 2e-05
+    min_lr: 2e-07
+    warmup_epochs: ${train_params.warmup_epochs}
+    weight_decay: ${train_params.weight_decay}
+    schedule_type: ${train_params.schedule_type}
+  model.point_head:
+    lr: 0
+  model.track_head:
+    lr: 0
+  metric_scale_head:
+    lr: 0
+
+# A800 + torch 2.8 (cu128) can hit SDPA kernel "invalid argument" issues for long sequences.
+# Prefer safe backends for VGGT fine-tuning stability.
+sdpa:
+  enable_flash: false
+  enable_math: true
+  enable_mem_efficient: true
+  enable_cudnn: true

@@ -1,0 +1,29 @@
+# Local path `map-anything` -> remote `mapanything_ft` rescue allowlist
+# Rules:
+# - overlay add/modify only; do not delete remote-tracked files unless separately reviewed
+# - artifact trees remain excluded except the listed canonical eval contract JSONs
+
+.github/
+.gitignore
+.pre-commit-config.yaml
+CHANGELOG.md
+CODE_OF_CONDUCT.md
+CONTRIBUTING.md
+LICENSE
+README.md
+environment.mapanything_ft.yml
+pyproject.toml
+setup.py
+train.md
+assets/
+bash_scripts/
+benchmarking/
+configs/
+data_processing/
+depth/
+docs/
+mapanything/
+scripts/
+
+# Force-track canonical eval contracts even though eval_runs/ is otherwise ignored
+# Include top-level frames/gt_scale JSONs and the reviewed Test500 bucket suite JSONs.

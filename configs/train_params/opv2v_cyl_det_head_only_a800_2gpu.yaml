@@ -1,0 +1,61 @@
+defaults:
+  - default
+
+# Cylindrical coop samples are heavy; keep batch size modest for stability.
+max_num_of_imgs_per_gpu: 8
+accum_iter: 1
+
+epochs: 5
+warmup_epochs: 1
+
+# Global LR kept at 0; only det_head is trained.
+lr: 0.0
+min_lr: 0.0
+
+save_freq: 1
+eval_freq: 999
+print_freq: 20
+
+# Fixed resolution -> enable CUDNN autotuning for speed.
+disable_cudnn_benchmark: false
+
+# Freeze everything except the BEV detection head.
+submodule_configs:
+  encoder:
+    lr: 0
+  info_sharing:
+    lr: 0
+  dpt_feature_head:
+    lr: 0
+  dpt_regressor_head:
+    lr: 0
+  pose_head:
+    lr: 0
+  pose_adaptor:
+    lr: 0
+  scale_head:
+    lr: 0
+  scale_adaptor:
+    lr: 0
+  ray_dirs_encoder:
+    lr: 0
+  depth_encoder:
+    lr: 0
+  depth_scale_encoder:
+    lr: 0
+  cam_rot_encoder:
+    lr: 0
+  cam_trans_encoder:
+    lr: 0
+  cam_trans_scale_encoder:
+    lr: 0
+  fusion_norm_layer:
+    lr: 0
+  scale_token:
+    lr: 0
+  det_head:
+    lr: 0.001
+    min_lr: 0.00001
+    warmup_epochs: ${train_params.warmup_epochs}
+    weight_decay: 0.0
+    schedule_type: ${train_params.schedule_type}

@@ -1,0 +1,47 @@
+defaults:
+  - default
+
+# OPV2V cooperative VGGT finetuning (8 views per sample).
+# Tune `max_num_of_imgs_per_gpu` so that batch_size = max_imgs_per_gpu // num_views stays >= 1.
+max_num_of_imgs_per_gpu: 8
+accum_iter: 1
+epochs: 20
+warmup_epochs: 2
+
+# Conservative LR by default (VGGT-1B is large).
+lr: 1e-05
+min_lr: 1e-07
+
+keep_freq: 5
+save_freq: 1
+eval_freq: 1
+print_freq: 20
+
+# Submodule-specific learning rates.
+# - Freeze the heavy aggregator by default.
+# - Train camera/depth heads + metric scale head.
+submodule_configs:
+  metric_scale_head:
+    lr: 3e-04
+    min_lr: 3e-06
+    warmup_epochs: ${train_params.warmup_epochs}
+    weight_decay: ${train_params.weight_decay}
+    schedule_type: ${train_params.schedule_type}
+  model.camera_head:
+    lr: 1e-05
+    min_lr: 1e-07
+    warmup_epochs: ${train_params.warmup_epochs}
+    weight_decay: ${train_params.weight_decay}
+    schedule_type: ${train_params.schedule_type}
+  model.depth_head:
+    lr: 1e-05
+    min_lr: 1e-07
+    warmup_epochs: ${train_params.warmup_epochs}
+    weight_decay: ${train_params.weight_decay}
+    schedule_type: ${train_params.schedule_type}
+  model.aggregator:
+    lr: 0
+  model.point_head:
+    lr: 0
+  model.track_head:
+    lr: 0

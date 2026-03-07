@@ -1,0 +1,5 @@
+# Detection-only loss for OPV2V (ego CARLA/UE boxes) with a wider BEV range.
+# Slightly upweight the heatmap term to reduce dense false positives.
+
+train_criterion: "BEVCenternetDetLoss(x_range=(-50.0, 120.0), y_range=(-50.0, 50.0), voxel_size=0.5, heatmap_weight=2.0, reg_weight=1.0, min_gaussian_radius=1, max_gaussian_radius=6)"
+test_criterion: "BEVCenternetDetLoss(x_range=(-50.0, 120.0), y_range=(-50.0, 50.0), voxel_size=0.5, heatmap_weight=2.0, reg_weight=1.0, min_gaussian_radius=1, max_gaussian_radius=6)"

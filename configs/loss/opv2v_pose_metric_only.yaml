@@ -1,0 +1,3 @@
+# Direct metric supervision on relative camera poses (no geometry terms).
+train_criterion: "RelativePoseMetricLoss(only_cross_agent=False, trans_weight=1.0, rot_weight=0.1, squared=False)"
+test_criterion: "RelativePoseMetricLoss(only_cross_agent=False, trans_weight=1.0, rot_weight=0.1, squared=False)"

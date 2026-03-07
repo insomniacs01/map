@@ -1,0 +1,38 @@
+enabled: true
+
+# End-to-end finetuning: allow det loss to backprop into MapAnything points.
+stop_gradient: false
+
+# Do not use predicted non-ambiguous mask as point weights by default.
+use_pred_mask: false
+
+# Avoid weighting by predicted confidence: OPV2V vehicle points can be low-confidence.
+use_pred_conf: false
+
+# Mild height filtering (ego CARLA/UE Z) to remove extreme outliers (sky/very tall structures).
+point_z_min: -1.0
+point_z_max: 3.0
+
+# Use GT camera poses to align camera-frame points to ego for BEV rasterization.
+point_pose_source: gt
+
+# BEV grid settings (ego CARLA/UE: X forward, Y right).
+x_range: [-50.0, 120.0]
+y_range: [-50.0, 50.0]
+voxel_size: 0.5
+
+# Point subsampling
+max_points: 200000
+
+# Extra BEV channels to help suppress flat-ground false positives.
+include_high_ratio: true
+z_high_threshold: 0.5
+include_var_z: true
+
+# Head capacity (must match checkpoints trained with wide e2e v1).
+hidden_channels: 128
+num_conv: 4
+
+# Lower initial objectness to avoid dense early predictions.
+heatmap_bias: -4.0
+
