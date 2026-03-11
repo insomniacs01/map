@@ -144,3 +144,58 @@
 - 验证结束后继续进入 `Epoch 1` 训练
 
 这说明当前真正可持续的方案是：**训练吃满单卡，验证单独控 batch，不再共享“翻倍”策略。**
+
+---
+
+# 2026-03-11 晚间新增诊断
+
+## 1. 固定 20 帧正式评测结论
+
+- 评测目录：`/media/tsinghua3090/66c73fca-acad-4d88-a5b9-47aa246d1d02/qqxluca/map-anything3_experiments/eval_bs160_epoch0_test20_seed42`
+- `base`：`pose_abs=20.31`，`pose_rot=5.09`，`depth_rmse=16.51`，`depth_mae=9.35`，`scale_err=3.43`，`bev_iou_filtered=0.2677`
+- `near40`：`pose_abs=20.06`，`pose_rot=4.83`，`depth_rmse=16.31`，`depth_mae=9.26`，`scale_err=5.39`，`bev_iou_filtered=0.2655`
+
+结论：
+
+1. `near40` 的确在 pose/depth 上略优。
+2. 但 `near40` 会明显恶化尺度误差，并且点云几何指标没有同步改善。
+3. 所以“把多车样本裁到近距离”只能解决一部分 overlap 问题，不能单独解决点云不可用问题。
+
+## 2. 距离截断的真实代价
+
+训练集原始可用多车帧（同帧原始 `>=2` agent）：`6374`
+
+- `<=30m`：`3573`（`56.1%`）
+- `<=40m`：`4690`（`73.6%`）
+- `<=50m`：`5339`（`83.8%`）
+- `<=60m`：`5758`（`90.3%`）
+- `<=80m`：`6160`（`96.6%`）
+
+同时，`>=3 agents` 的帧占比从原始 `61.5%` 降到 `40m` 截断后的 `25.5%`。
+
+这说明 `40m` 虽然没有把数据砍到很少，但显著削弱了多车协同的“多主体丰富度”，也减少了长基线尺度样本。
+
+## 3. 为什么“同车打标签”不是当前最有效修复
+
+当前代码里 `label` 字段主要用于 view naming / 外部模型的 image path bookkeeping，不会直接变成“同标签更近、异标签更远”的损失。
+
+所以：
+
+- 单纯把同车图像打相同标签，不会自动让模型学到 rig 内几何更近。
+- 真正有效的是：
+  - 显式 `agent/camera identity embedding`（已完成）
+  - 同车 rig 刚体约束 / baseline 约束（待加强）
+  - overlap-aware / curriculum 采样（下一版优先做）
+
+## 4. 新增代码级修复
+
+- [x] 在 `OPV2VCoopDataset` 初始化阶段增加距离/视角约束后的场景预过滤
+- [x] 目的：避免 `Need 2 agents after filtering but got 1` 的无效样本在训练中反复重试
+- [x] 新增 `configs/dataset/opv2v_coop_ft_structured_stagea_mix40.yaml`
+- [x] 策略：`4096 near40 + 4096 full-range` 混合 curriculum
+
+## 5. 下一版验证计划
+
+- [ ] 启动 `mix40` 正式训练
+- [ ] 在相同 epoch 快照上复用固定 `20` 帧评测
+- [ ] 如果混合 curriculum 仍有明显 `scale_err` 偏差，再补“跨车 baseline / rig-consistency”损失

@@ -241,3 +241,34 @@
 - [ ] 还没有拿到最终“完全没问题”的正式版本 checkpoint
 
 因此，当前状态不是“问题还没动”，而是已经从 **不能训练 / 训练即坏** 进入到 **多条可运行训练路线并行比较** 的阶段。
+
+---
+
+## 2026-03-11 晚间新增进展
+
+### 已完成确认
+
+- [x] 完成固定 `20` 帧、固定快照的正式对比评测：`eval_bs160_epoch0_test20_seed42`
+- [x] 确认 `near40` 不是“全面更好”，而是明显 trade-off：
+  - [x] pose/depth 略优：`pose_abs 20.31 -> 20.06`，`pose_rot 5.09 -> 4.83`，`depth_rmse 16.51 -> 16.31`
+  - [x] scale/点云几何更差：`scale_err 3.43 -> 5.39`，`chamfer_filtered_pred_to_gt 1.569 -> 1.587`
+  - [x] `bev_iou_filtered` 也略差：`0.2677 -> 0.2655`
+- [x] 量化 `train` split 距离截断影响：
+  - [x] 原始同帧 `>=2 agents`：`6374`
+  - [x] `<=40m` 后仍可用于 `2 agents x 4 cams` 结构化采样：`4690 / 6374 = 73.6%`
+  - [x] 原始 `>=3 agents` 占比：`61.5%`
+  - [x] `<=40m` 后 `>=3 agents` 占比：`25.5%`
+  - [x] 最近邻车间距分位数：`P50=27.1m`、`P75=41.2m`、`P90=59.6m`
+- [x] 确认“同车打同一 label”目前不会自动形成几何监督，`label` 主要只用于 view naming / bookkeeping
+
+### 本轮新增修复
+
+- [x] 在 `OPV2VCoopDataset` 初始化阶段预过滤距离截断后的无效场景，避免 DataLoader 长时间反复重试 `Need 2 agents after filtering but got 1`
+- [x] 新增混合 curriculum 配置 `configs/dataset/opv2v_coop_ft_structured_stagea_mix40.yaml`
+- [x] 新配置采用 `4096 near40 + 4096 full-range`，目标是保留近距离 overlap 优势，同时保住尺度分布
+
+### 下一步
+
+- [ ] 用 `mix40` 配置启动正式训练
+- [ ] 在相同 epoch 快照上复用固定 `20` 帧评测，比较 `base / near40 / mix40`
+- [ ] 如果 `mix40` 仍有明显尺度偏差，再补“跨车 baseline / rig-consistency”损失

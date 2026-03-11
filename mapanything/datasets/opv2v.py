@@ -275,6 +275,8 @@ class OPV2VCoopDataset(BaseDataset):
             raise FileNotFoundError(f"Split directory not found: {split_root}")
 
         scenes: List[Dict] = []
+        raw_scene_count = 0
+        dropped_scene_count = 0
         for sequence_dir in sorted(d for d in split_root.iterdir() if d.is_dir()):
             agent_dirs = [d for d in sequence_dir.iterdir() if d.is_dir()]
             if self.include_agents:
@@ -293,8 +295,17 @@ class OPV2VCoopDataset(BaseDataset):
             for frame_id, agents in sorted(frame_to_agents.items()):
                 if len(agents) < self.min_agents:
                     continue
+                raw_scene_count += 1
                 agents_sorted = sorted(agents)
                 agent_dir_map = {agent_id: sequence_dir / agent_id for agent_id in agents_sorted}
+                if not self._scene_is_usable_after_filter(
+                    sequence=sequence_dir.name,
+                    frame_id=frame_id,
+                    agents=agents_sorted,
+                    agent_dirs=agent_dir_map,
+                ):
+                    dropped_scene_count += 1
+                    continue
                 scenes.append(
                     dict(
                         sequence=sequence_dir.name,
@@ -313,8 +324,94 @@ class OPV2VCoopDataset(BaseDataset):
                 f"No cooperative OPV2V scenes found in split {self.split} under {split_root}"
             )
 
+        if raw_scene_count > 0 and dropped_scene_count > 0:
+            print(
+                f"OPV2VCoopDataset[{self.split}] kept {len(scenes)}/{raw_scene_count} "
+                f"scenes after coop filtering (dropped {dropped_scene_count})."
+            )
+
         self.scenes = scenes
         self.num_of_scenes = len(scenes)
+
+    def _target_agents_per_scene(self) -> int:
+        if self.structured_sampling:
+            return self.agents_per_sample or self.min_agents
+        return self.min_agents
+
+    def _required_views_per_agent(self) -> int:
+        return self.views_per_agent if self.structured_sampling else 1
+
+    def _prefilter_main_agent(self, agents: List[str]) -> str | None:
+        if self.main_agent and self.main_agent in agents:
+            return self.main_agent
+        if self.main_agent_policy == "random":
+            return None
+        return sorted(agents)[0]
+
+    def _scene_is_usable_after_filter(
+        self,
+        sequence: str,
+        frame_id: str,
+        agents: List[str],
+        agent_dirs: Dict[str, Path],
+    ) -> bool:
+        main_agent = self._prefilter_main_agent(agents)
+        if main_agent is None:
+            return True
+
+        target_agents = self._target_agents_per_scene()
+        required_views_per_agent = self._required_views_per_agent()
+
+        if (
+            self.max_agent_distance is None
+            and not self.require_complete_rig
+            and target_agents <= self.min_agents
+            and required_views_per_agent <= 1
+        ):
+            return True
+
+        frame_meta_by_agent = {}
+        for agent_id in agents:
+            yaml_path = agent_dirs[agent_id] / f"{frame_id}.yaml"
+            if not yaml_path.exists():
+                return False
+            frame_meta_by_agent[agent_id] = load_frame_metadata(yaml_path)
+
+        T_world_main = cords_to_pose(frame_meta_by_agent[main_agent]["lidar_pose"])
+        T_main_world = np.linalg.inv(T_world_main)
+        main_position = T_world_main[:3, 3]
+        valid_agent_count = 0
+
+        for agent_id in agents:
+            meta = frame_meta_by_agent[agent_id]
+            agent_pose_world = cords_to_pose(meta["lidar_pose"])
+            agent_distance = float(np.linalg.norm(agent_pose_world[:3, 3] - main_position))
+            if (
+                self.max_agent_distance is not None
+                and agent_id != main_agent
+                and agent_distance > self.max_agent_distance
+            ):
+                continue
+
+            entries = self._build_agent_entries(
+                sequence=sequence,
+                frame_id=frame_id,
+                agent_id=agent_id,
+                agent_dir=agent_dirs[agent_id],
+                meta=meta,
+                T_main_world=T_main_world,
+                agent_distance=agent_distance,
+            )
+            if len(entries) < required_views_per_agent:
+                continue
+            if self.require_complete_rig and len(entries) < self.views_per_agent:
+                continue
+
+            valid_agent_count += 1
+            if valid_agent_count >= target_agents:
+                return True
+
+        return False
 
     def _choose_main_agent(self, agents: List[str]) -> str:
         if self.main_agent and self.main_agent in agents:
