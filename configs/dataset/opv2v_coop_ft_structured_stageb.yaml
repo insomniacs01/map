@@ -2,15 +2,22 @@ defaults:
   - default
   - opv2v: default
 
-num_views: 10
+num_views: 8
 
-# Cooperative settings
-coop_include_agents: null  # use all available vehicles
-coop_min_agents: 1
-coop_main_agent: '641'
+coop_include_agents: null
+coop_min_agents: 2
+coop_main_agent: null
 coop_main_agent_policy: first
-coop_min_num_views: 4
-coop_max_num_views: null
+coop_min_num_views: 8
+coop_max_num_views: 8
+coop_structured_sampling: true
+coop_agents_per_sample: 2
+coop_views_per_agent: 4
+coop_agent_selection_policy: nearest
+coop_max_agent_distance: null
+coop_require_complete_rig: true
+coop_shuffle_views: false
+coop_emit_identity_metadata: true
 
 train:
   variable_num_views: false
@@ -22,18 +29,32 @@ test:
 resolution_train: ${dataset.resolution_options.448_1_77_ar}
 resolution_val: ${dataset.resolution_options.448_1_77_ar}
 
+opv2v:
+  train:
+    max_num_retries: 8
+  val:
+    max_num_retries: 8
+
 train_dataset:
-  "+ 20_000 @ OPV2VCoopDataset(
-    split='${dataset.opv2v.val.split}',
+  "+ 512 @ OPV2VCoopDataset(
+    split='${dataset.opv2v.train.split}',
     ROOT='${dataset.opv2v.images_root}',
     depth_root='${dataset.opv2v.depth_root}',
     camera_ids=${dataset.opv2v.camera_ids},
     include_agents=${dataset.coop_include_agents},
-    main_agent='${dataset.coop_main_agent}',
+    main_agent=${dataset.coop_main_agent},
     main_agent_policy='${dataset.coop_main_agent_policy}',
     min_agents=${dataset.coop_min_agents},
     min_num_views=${dataset.coop_min_num_views},
     max_num_views=${dataset.coop_max_num_views},
+    structured_sampling=${dataset.coop_structured_sampling},
+    agents_per_sample=${dataset.coop_agents_per_sample},
+    views_per_agent=${dataset.coop_views_per_agent},
+    agent_selection_policy='${dataset.coop_agent_selection_policy}',
+    max_agent_distance=${dataset.coop_max_agent_distance},
+    require_complete_rig=${dataset.coop_require_complete_rig},
+    shuffle_views=${dataset.coop_shuffle_views},
+    emit_identity_metadata=${dataset.coop_emit_identity_metadata},
     num_views=${dataset.num_views},
     variable_num_views=${dataset.train.variable_num_views},
     resolution=${dataset.opv2v.train.dataset_resolution},
@@ -45,17 +66,25 @@ train_dataset:
     max_num_retries=${dataset.opv2v.train.max_num_retries})"
 
 test_dataset:
-  "+ 200 @ OPV2VCoopDataset(
-    split='${dataset.opv2v.train.split}',
+  "+ 64 @ OPV2VCoopDataset(
+    split='${dataset.opv2v.val.split}',
     ROOT='${dataset.opv2v.images_root}',
     depth_root='${dataset.opv2v.depth_root}',
     camera_ids=${dataset.opv2v.camera_ids},
     include_agents=${dataset.coop_include_agents},
-    main_agent='${dataset.coop_main_agent}',
+    main_agent=${dataset.coop_main_agent},
     main_agent_policy='${dataset.coop_main_agent_policy}',
     min_agents=${dataset.coop_min_agents},
     min_num_views=${dataset.coop_min_num_views},
     max_num_views=${dataset.coop_max_num_views},
+    structured_sampling=${dataset.coop_structured_sampling},
+    agents_per_sample=${dataset.coop_agents_per_sample},
+    views_per_agent=${dataset.coop_views_per_agent},
+    agent_selection_policy='${dataset.coop_agent_selection_policy}',
+    max_agent_distance=${dataset.coop_max_agent_distance},
+    require_complete_rig=${dataset.coop_require_complete_rig},
+    shuffle_views=${dataset.coop_shuffle_views},
+    emit_identity_metadata=${dataset.coop_emit_identity_metadata},
     num_views=${dataset.num_views},
     variable_num_views=${dataset.val.variable_num_views},
     resolution=${dataset.opv2v.val.dataset_resolution},

@@ -1,0 +1,30 @@
+defaults:
+  - default
+  - encoder: dinov2_large
+  - info_sharing: aat_ifr_24_layers
+  - pred_head: dpt_pose_scale
+  - task: images_only
+
+encoder:
+  gradient_checkpointing: true
+
+info_sharing:
+  module_args:
+    gradient_checkpointing: true
+
+pred_head:
+  gradient_checkpointing: true
+
+model_str: "mapanything"
+model_config:
+  name: "mapanything"
+  encoder_config: ${model.encoder}
+  info_sharing_config: ${model.info_sharing}
+  pred_head_config: ${model.pred_head}
+  geometric_input_config: ${model.task}
+  use_agent_camera_identity_embeddings: true
+  num_agent_embeddings: 8
+  num_camera_embeddings: 4
+  identity_embedding_scale: 1.0
+
+data_norm_type: ${model.encoder.data_norm_type}

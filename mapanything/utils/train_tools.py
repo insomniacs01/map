@@ -356,7 +356,13 @@ def save_on_master(*args, **kwargs):
         **kwargs: Keyword arguments to pass to torch.save()
     """
     if is_main_process():
-        torch.save(*args, **kwargs)
+        if len(args) >= 2 and isinstance(args[1], (str, os.PathLike)):
+            target_path = Path(args[1])
+            tmp_path = target_path.with_suffix(target_path.suffix + ".tmp")
+            torch.save(args[0], tmp_path, **kwargs)
+            tmp_path.replace(target_path)
+        else:
+            torch.save(*args, **kwargs)
 
 
 def init_distributed_mode(args):
@@ -393,11 +399,14 @@ def init_distributed_mode(args):
         ),
         flush=True,
     )
+    # Allow overriding the init timeout via TORCH_DIST_TIMEOUT (seconds); default to 2 hours
+    timeout_seconds = int(os.environ.get("TORCH_DIST_TIMEOUT", 7200))
     torch.distributed.init_process_group(
         backend=args.dist_backend,
         init_method=args.dist_url,
         world_size=args.world_size,
         rank=args.rank,
+        timeout=datetime.timedelta(seconds=timeout_seconds),
     )
     torch.distributed.barrier()
     setup_for_distributed(args.rank == 0)

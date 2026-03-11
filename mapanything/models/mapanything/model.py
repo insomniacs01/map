@@ -101,6 +101,10 @@ class MapAnything(nn.Module, PyTorchModelHubMixin):
         load_specific_pretrained_submodules: bool = False,
         specific_pretrained_submodules: list = None,
         torch_hub_force_reload: bool = False,
+        use_agent_camera_identity_embeddings: bool = False,
+        num_agent_embeddings: int = 8,
+        num_camera_embeddings: int = 4,
+        identity_embedding_scale: float = 1.0,
     ):
         """
         Multi-view model containing an image encoder fused with optional geometric modalities followed by a multi-view attention transformer and respective downstream heads.
@@ -131,6 +135,10 @@ class MapAnything(nn.Module, PyTorchModelHubMixin):
         self.load_specific_pretrained_submodules = load_specific_pretrained_submodules
         self.specific_pretrained_submodules = specific_pretrained_submodules
         self.torch_hub_force_reload = torch_hub_force_reload
+        self.use_agent_camera_identity_embeddings = use_agent_camera_identity_embeddings
+        self.num_agent_embeddings = int(num_agent_embeddings)
+        self.num_camera_embeddings = int(num_camera_embeddings)
+        self.identity_embedding_scale = float(identity_embedding_scale)
         self.class_init_args = {
             "name": self.name,
             "encoder_config": self.encoder_config,
@@ -141,6 +149,10 @@ class MapAnything(nn.Module, PyTorchModelHubMixin):
             "load_specific_pretrained_submodules": self.load_specific_pretrained_submodules,
             "specific_pretrained_submodules": self.specific_pretrained_submodules,
             "torch_hub_force_reload": self.torch_hub_force_reload,
+            "use_agent_camera_identity_embeddings": self.use_agent_camera_identity_embeddings,
+            "num_agent_embeddings": self.num_agent_embeddings,
+            "num_camera_embeddings": self.num_camera_embeddings,
+            "identity_embedding_scale": self.identity_embedding_scale,
         }
 
         # Get relevant parameters from the configs
@@ -200,6 +212,20 @@ class MapAnything(nn.Module, PyTorchModelHubMixin):
         # During inference extended to (B, C, T), where T is the number of tokens (i.e., 1)
         self.scale_token = nn.Parameter(torch.zeros(self.encoder.enc_embed_dim))
         torch.nn.init.trunc_normal_(self.scale_token, std=0.02)
+
+        self.agent_identity_embedding = None
+        self.camera_identity_embedding = None
+        if self.use_agent_camera_identity_embeddings:
+            if self.num_agent_embeddings > 0:
+                self.agent_identity_embedding = nn.Embedding(
+                    self.num_agent_embeddings, self.encoder.enc_embed_dim
+                )
+                torch.nn.init.trunc_normal_(self.agent_identity_embedding.weight, std=0.02)
+            if self.num_camera_embeddings > 0:
+                self.camera_identity_embedding = nn.Embedding(
+                    self.num_camera_embeddings, self.encoder.enc_embed_dim
+                )
+                torch.nn.init.trunc_normal_(self.camera_identity_embedding.weight, std=0.02)
 
         # Initialize the info sharing module (multi-view transformer)
         self._initialize_info_sharing(info_sharing_config)
@@ -603,7 +629,22 @@ class MapAnything(nn.Module, PyTorchModelHubMixin):
                     f"Loading pretrained MapAnything weights from {self.pretrained_checkpoint_path} ..."
                 )
                 ckpt = torch.load(self.pretrained_checkpoint_path, weights_only=False)
-                print(self.load_state_dict(ckpt["model"]))
+                strict = not self.use_agent_camera_identity_embeddings
+                load_result = self.load_state_dict(ckpt["model"], strict=strict)
+                if self.use_agent_camera_identity_embeddings:
+                    allowed_missing = {
+                        "agent_identity_embedding.weight",
+                        "camera_identity_embedding.weight",
+                    }
+                    unexpected = set(load_result.unexpected_keys)
+                    missing = set(load_result.missing_keys)
+                    disallowed_missing = missing - allowed_missing
+                    if unexpected or disallowed_missing:
+                        raise RuntimeError(
+                            "Unexpected checkpoint mismatch while loading identity-enabled model: "
+                            f"missing={sorted(disallowed_missing)}, unexpected={sorted(unexpected)}"
+                        )
+                print(load_result)
             else:
                 print(
                     f"Loading pretrained MapAnything weights from {self.pretrained_checkpoint_path} for specific submodules: {self.specific_pretrained_submodules} ..."
@@ -618,6 +659,62 @@ class MapAnything(nn.Module, PyTorchModelHubMixin):
                         if ckpt_key.startswith(submodule):
                             filtered_ckpt[ckpt_key] = ckpt_value
                 print(self.load_state_dict(filtered_ckpt, strict=False))
+
+    def _prepare_identity_index(self, view, key, batch_size, device):
+        if key not in view:
+            return None
+        index_tensor = view[key]
+        if not isinstance(index_tensor, torch.Tensor):
+            index_tensor = torch.as_tensor(index_tensor, device=device)
+        else:
+            index_tensor = index_tensor.to(device)
+        if index_tensor.ndim == 0:
+            index_tensor = index_tensor.unsqueeze(0)
+        index_tensor = index_tensor.reshape(-1).long()
+        if index_tensor.numel() == 1 and batch_size > 1:
+            index_tensor = index_tensor.repeat(batch_size)
+        elif index_tensor.numel() != batch_size:
+            raise ValueError(
+                f"Identity field '{key}' expected {batch_size} values, got {index_tensor.numel()}"
+            )
+        return index_tensor
+
+    def _fuse_view_identity_embeddings(self, views, all_encoder_features_across_views):
+        if not self.use_agent_camera_identity_embeddings:
+            return all_encoder_features_across_views
+
+        fused_features = []
+        for view, feature in zip(views, all_encoder_features_across_views):
+            batch_size = feature.shape[0]
+            device = feature.device
+            identity_bias = None
+
+            if self.agent_identity_embedding is not None:
+                agent_index = self._prepare_identity_index(
+                    view, key="agent_index", batch_size=batch_size, device=device
+                )
+                if agent_index is not None:
+                    agent_index = agent_index.clamp(0, self.num_agent_embeddings - 1)
+                    agent_bias = self.agent_identity_embedding(agent_index)
+                    identity_bias = agent_bias if identity_bias is None else identity_bias + agent_bias
+
+            if self.camera_identity_embedding is not None:
+                camera_index = self._prepare_identity_index(
+                    view, key="camera_index", batch_size=batch_size, device=device
+                )
+                if camera_index is not None:
+                    camera_index = camera_index.clamp(0, self.num_camera_embeddings - 1)
+                    camera_bias = self.camera_identity_embedding(camera_index)
+                    identity_bias = camera_bias if identity_bias is None else identity_bias + camera_bias
+
+            if identity_bias is None:
+                fused_features.append(feature)
+                continue
+
+            identity_bias = (identity_bias * self.identity_embedding_scale).to(feature.dtype)
+            fused_features.append(feature + identity_bias[..., None, None])
+
+        return fused_features
 
     def _encode_n_views(self, views):
         """
@@ -640,6 +737,9 @@ class MapAnything(nn.Module, PyTorchModelHubMixin):
         encoder_output = self.encoder(encoder_input)
         all_encoder_features_across_views = encoder_output.features.chunk(
             num_views, dim=0
+        )
+        all_encoder_features_across_views = self._fuse_view_identity_embeddings(
+            views, all_encoder_features_across_views
         )
 
         return all_encoder_features_across_views

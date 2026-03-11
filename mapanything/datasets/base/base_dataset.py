@@ -143,6 +143,8 @@ class BaseDataset(EasyDataset):
         # Initialize the dataset type flags
         self.is_metric_scale = False  # by default a dataset is not metric scale, subclasses can overwrite this
         self.is_synthetic = False  # by default a dataset is not synthetic, subclasses can overwrite this
+        self.allow_variable_view_count = False
+        self.min_num_views_allowed = 2
 
     def _load_data(self):
         self.scenes = []
@@ -481,10 +483,15 @@ class BaseDataset(EasyDataset):
         else:
             num_views_to_sample = self.num_views[num_views_to_sample_idx]
         views = self._get_views(idx, num_views_to_sample, resolution)
-        if isinstance(self.num_views, int):
-            assert len(views) == self.num_views
+        if not self.allow_variable_view_count:
+            if isinstance(self.num_views, int):
+                assert len(views) == self.num_views
+            else:
+                assert len(views) in self.num_views
         else:
-            assert len(views) in self.num_views
+            assert len(views) >= self.min_num_views_allowed, (
+                f"Expected at least {self.min_num_views_allowed} views, got {len(views)}"
+            )
 
         for v, view in enumerate(views):
             # Store the index and other metadata

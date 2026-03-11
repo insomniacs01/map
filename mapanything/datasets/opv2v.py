@@ -20,9 +20,6 @@ from mapanything.datasets.base.base_dataset import BaseDataset
 
 
 def _convert_pose_to_opencv(pose: np.ndarray) -> np.ndarray:
-    """
-    Convert a camera pose expressed in CARLA coordinates to OpenCV convention.
-    """
     pose_cv = pose.copy()
     basis = CARLA_TO_CAMERA_CV[:3, :3]
     pose_cv[:3, :3] = basis @ pose[:3, :3] @ basis.T
@@ -61,7 +58,6 @@ class OPV2VDataset(BaseDataset):
 
         self._load_data()
 
-        # OPV2V is rendered in CARLA, so we mark it as metric + synthetic
         self.is_metric_scale = True
         self.is_synthetic = True
 
@@ -81,7 +77,7 @@ class OPV2VDataset(BaseDataset):
                 for yaml_path in yaml_files:
                     frame_id = yaml_path.stem
                     if not frame_id.isdigit():
-                        continue  # Skip auxiliary YAMLs like data_protocol
+                        continue
                     scenes.append(
                         dict(
                             sequence=sequence_dir.name,
@@ -127,7 +123,6 @@ class OPV2VDataset(BaseDataset):
 
         views = []
         for cam_key in selected_cam_keys:
-            cam_idx = cam_key.replace("camera", "")
             img_path = scene_info["image_dir"] / f"{scene_info['frame']}_{cam_key}.png"
             depth_path = (
                 self.depth_root
@@ -176,7 +171,7 @@ class OPV2VDataset(BaseDataset):
 class OPV2VCoopDataset(BaseDataset):
     """
     Multi-agent variant that loads the same timestamp across several vehicles and
-    expresses every camera in the main agent's ego (LiDAR) frame.
+    expresses every camera in the main agent's ego frame.
     """
 
     def __init__(
@@ -189,7 +184,17 @@ class OPV2VCoopDataset(BaseDataset):
         include_agents: Sequence[str] | None = None,
         main_agent: str | None = None,
         main_agent_policy: str = "first",
-        min_agents: int = 2,
+        min_agents: int = 1,
+        min_num_views: int = 4,
+        max_num_views: int | None = None,
+        structured_sampling: bool = False,
+        agents_per_sample: int | None = None,
+        views_per_agent: int | None = None,
+        agent_selection_policy: str = "random",
+        max_agent_distance: float | None = None,
+        require_complete_rig: bool = False,
+        shuffle_views: bool = True,
+        emit_identity_metadata: bool = False,
         max_scenes: int | None = None,
         **kwargs,
     ):
@@ -201,14 +206,68 @@ class OPV2VCoopDataset(BaseDataset):
         self.include_agents = set(include_agents) if include_agents else None
         self.main_agent = main_agent
         self.main_agent_policy = main_agent_policy
-        self.min_agents = max(2, int(min_agents))
+        self.structured_sampling = bool(structured_sampling)
+        self.views_per_agent = (
+            int(views_per_agent) if views_per_agent is not None else len(self.camera_ids)
+        )
+        self.agents_per_sample = (
+            int(agents_per_sample) if agents_per_sample is not None else None
+        )
+        self.agent_selection_policy = agent_selection_policy
+        self.max_agent_distance = (
+            float(max_agent_distance) if max_agent_distance is not None else None
+        )
+        self.require_complete_rig = bool(require_complete_rig)
+        self.shuffle_views = bool(shuffle_views)
+        self.emit_identity_metadata = bool(emit_identity_metadata)
+        self.min_dynamic_views = max(1, int(min_num_views))
+        self.requested_max_num_views = max_num_views
         self.max_scenes = max_scenes
         self.dataset_name = "OPV2VCoop"
+
+        self.min_agents = max(1, int(min_agents))
+        if self.structured_sampling and self.agents_per_sample is not None:
+            self.min_agents = max(self.min_agents, self.agents_per_sample)
+
+        self.allow_variable_view_count = False
+        self.min_num_views_allowed = self.min_dynamic_views
 
         self._load_data()
 
         self.is_metric_scale = True
         self.is_synthetic = True
+        self.max_views_per_scene = max(len(scene["agents"]) for scene in self.scenes) * len(
+            self.camera_ids
+        )
+
+        if self.structured_sampling:
+            if self.agents_per_sample is None:
+                if isinstance(self.num_views, int):
+                    self.agents_per_sample = max(1, self.num_views // self.views_per_agent)
+                else:
+                    self.agents_per_sample = self.min_agents
+            if isinstance(self.num_views, int):
+                self.num_views = self.agents_per_sample * self.views_per_agent
+            self.min_num_views_allowed = self.num_views
+        else:
+            requested_num_views = max(self.num_views) if isinstance(self.num_views, list) else int(self.num_views)
+            max_dynamic_views = requested_num_views
+            if self.requested_max_num_views is not None:
+                max_dynamic_views = min(max_dynamic_views, int(self.requested_max_num_views))
+            max_dynamic_views = min(max_dynamic_views, self.max_views_per_scene)
+            self.max_dynamic_views = max(1, max_dynamic_views)
+            self.min_dynamic_views = min(self.min_dynamic_views, self.max_dynamic_views)
+            self.allow_variable_view_count = bool(self.variable_num_views) or (
+                self.min_dynamic_views != self.max_dynamic_views
+            )
+            if self.allow_variable_view_count:
+                self.num_views = list(
+                    range(self.min_dynamic_views, self.max_dynamic_views + 1)
+                )
+                self.min_num_views_allowed = self.min_dynamic_views
+            else:
+                self.num_views = self.max_dynamic_views
+                self.min_num_views_allowed = self.max_dynamic_views
 
     def _load_data(self):
         split_root = self.root / self.split
@@ -262,8 +321,147 @@ class OPV2VCoopDataset(BaseDataset):
             return self.main_agent
         if self.main_agent_policy == "random":
             return agents[int(self._rng.integers(0, len(agents)))]
-        # Default: deterministic first (sorted)
         return sorted(agents)[0]
+
+    def _build_agent_entries(
+        self,
+        sequence: str,
+        frame_id: str,
+        agent_id: str,
+        agent_dir: Path,
+        meta: Dict,
+        T_main_world: np.ndarray,
+        agent_distance: float,
+    ) -> List[Dict]:
+        entries: List[Dict] = []
+        for camera_index, cam_key in enumerate(self.camera_ids):
+            if cam_key not in meta:
+                continue
+            img_path = agent_dir / f"{frame_id}_{cam_key}.png"
+            depth_path = (
+                self.depth_root / self.split / sequence / agent_id / f"{frame_id}_{cam_key}_depth.npy"
+            )
+            if not img_path.exists() or not depth_path.exists():
+                continue
+
+            cam_pose_world = cords_to_pose(meta[cam_key]["cords"])
+            cam_pose_main = T_main_world @ cam_pose_world
+            entries.append(
+                dict(
+                    agent_id=agent_id,
+                    agent_distance=float(agent_distance),
+                    cam_key=cam_key,
+                    camera_index=int(camera_index),
+                    img_path=img_path,
+                    depth_path=depth_path,
+                    intrinsics=np.array(meta[cam_key]["intrinsic"], dtype=np.float32),
+                    camera_pose=cam_pose_main.astype(np.float32),
+                )
+            )
+        return entries
+
+    def _order_candidates(self, candidates: List[Dict], main_agent: str) -> List[Dict]:
+        if self.agent_selection_policy == "nearest":
+            return sorted(
+                candidates,
+                key=lambda item: (
+                    item["agent_id"] != main_agent,
+                    item["agent_distance"],
+                    item["agent_id"],
+                ),
+            )
+        if self.agent_selection_policy == "farthest":
+            return sorted(
+                candidates,
+                key=lambda item: (
+                    item["agent_id"] != main_agent,
+                    -item["agent_distance"],
+                    item["agent_id"],
+                ),
+            )
+        if self.agent_selection_policy == "first":
+            return sorted(
+                candidates,
+                key=lambda item: (
+                    item["agent_id"] != main_agent,
+                    item["agent_id"],
+                ),
+            )
+        ordered = list(candidates)
+        if len(ordered) > 1:
+            perm = self._rng.permutation(len(ordered))
+            ordered = [ordered[idx] for idx in perm]
+            ordered.sort(key=lambda item: item["agent_id"] != main_agent)
+        return ordered
+
+    def _select_structured_entries(
+        self,
+        candidates: List[Dict],
+        main_agent: str,
+    ) -> List[Dict]:
+        ordered = self._order_candidates(candidates, main_agent)
+        target_agents = self.agents_per_sample or self.min_agents
+        selected_agents = ordered[:target_agents]
+        if len(selected_agents) < target_agents:
+            raise ValueError(
+                f"Need {target_agents} agents after filtering but got {len(selected_agents)}"
+            )
+
+        selected_entries: List[Dict] = []
+        for agent_index, agent_bundle in enumerate(selected_agents):
+            entries = sorted(agent_bundle["entries"], key=lambda item: item["camera_index"])
+            if len(entries) < self.views_per_agent:
+                raise ValueError(
+                    f"Agent {agent_bundle['agent_id']} has only {len(entries)} views, "
+                    f"need {self.views_per_agent}"
+                )
+            entries = entries[: self.views_per_agent]
+            for entry in entries:
+                enriched = dict(entry)
+                enriched["agent_index"] = int(agent_index)
+                selected_entries.append(enriched)
+
+        if self.shuffle_views and len(selected_entries) > 1:
+            perm = self._rng.permutation(len(selected_entries))
+            selected_entries = [selected_entries[idx] for idx in perm]
+
+        return selected_entries
+
+    def _select_unstructured_entries(
+        self,
+        available_entries: List[Dict],
+        num_views_to_sample: int,
+        main_agent: str,
+    ) -> List[Dict]:
+        total_available = len(available_entries)
+        if total_available < self.min_dynamic_views:
+            raise ValueError(
+                f"Need at least {self.min_dynamic_views} views but got {total_available}"
+            )
+
+        if self.allow_variable_view_count:
+            max_allowed = min(self.max_dynamic_views, total_available)
+            min_allowed = min(self.min_dynamic_views, max_allowed)
+            actual_num_views = int(self._rng.integers(min_allowed, max_allowed + 1))
+        else:
+            if num_views_to_sample > total_available:
+                raise ValueError(
+                    f"Requested {num_views_to_sample} views but only {total_available} available"
+                )
+            actual_num_views = num_views_to_sample
+
+        idx_perm = self._rng.permutation(total_available)
+        selected_entries = [available_entries[i] for i in idx_perm[:actual_num_views]]
+
+        if self.emit_identity_metadata:
+            ordered_agent_ids = sorted({entry["agent_id"] for entry in selected_entries})
+            if main_agent in ordered_agent_ids:
+                ordered_agent_ids = [main_agent] + [aid for aid in ordered_agent_ids if aid != main_agent]
+            agent_to_index = {agent_id: idx for idx, agent_id in enumerate(ordered_agent_ids)}
+            for entry in selected_entries:
+                entry["agent_index"] = int(agent_to_index[entry["agent_id"]])
+
+        return selected_entries
 
     def _get_views(self, sampled_idx, num_views_to_sample, resolution):
         scene_info = self.scenes[sampled_idx]
@@ -283,44 +481,53 @@ class OPV2VCoopDataset(BaseDataset):
         T_world_main = cords_to_pose(frame_meta_by_agent[main_agent]["lidar_pose"])
         T_main_world = np.linalg.inv(T_world_main)
 
-        available_cams = []
+        candidate_agents: List[Dict] = []
+        available_entries: List[Dict] = []
+        main_position = T_world_main[:3, 3]
+        required_views_per_agent = self.views_per_agent if self.structured_sampling else 1
+
         for agent_id in agents:
             meta = frame_meta_by_agent[agent_id]
-            for cam_key in self.camera_ids:
-                if cam_key not in meta:
-                    continue
-                img_path = agent_dirs[agent_id] / f"{frame_id}_{cam_key}.png"
-                depth_path = (
-                    self.depth_root
-                    / self.split
-                    / sequence
-                    / agent_id
-                    / f"{frame_id}_{cam_key}_depth.npy"
-                )
-                if not img_path.exists() or not depth_path.exists():
-                    continue
+            agent_pose_world = cords_to_pose(meta["lidar_pose"])
+            agent_distance = float(np.linalg.norm(agent_pose_world[:3, 3] - main_position))
+            if (
+                self.max_agent_distance is not None
+                and agent_id != main_agent
+                and agent_distance > self.max_agent_distance
+            ):
+                continue
 
-                cam_pose_world = cords_to_pose(meta[cam_key]["cords"])
-                cam_pose_main = T_main_world @ cam_pose_world
-                available_cams.append(
-                    dict(
-                        agent_id=agent_id,
-                        cam_key=cam_key,
-                        img_path=img_path,
-                        depth_path=depth_path,
-                        intrinsics=np.array(meta[cam_key]["intrinsic"], dtype=np.float32),
-                        camera_pose=cam_pose_main.astype(np.float32),
-                    )
-                )
-
-        if len(available_cams) < num_views_to_sample:
-            raise ValueError(
-                f"Requested {num_views_to_sample} views but only "
-                f"{len(available_cams)} available for frame {scene_info}"
+            entries = self._build_agent_entries(
+                sequence=sequence,
+                frame_id=frame_id,
+                agent_id=agent_id,
+                agent_dir=agent_dirs[agent_id],
+                meta=meta,
+                T_main_world=T_main_world,
+                agent_distance=agent_distance,
             )
+            if len(entries) < required_views_per_agent:
+                continue
+            if self.require_complete_rig and len(entries) < self.views_per_agent:
+                continue
 
-        idx_perm = self._rng.permutation(len(available_cams))
-        selected_entries = [available_cams[i] for i in idx_perm[:num_views_to_sample]]
+            candidate_agents.append(
+                {
+                    "agent_id": agent_id,
+                    "agent_distance": agent_distance,
+                    "entries": entries,
+                }
+            )
+            available_entries.extend(entries)
+
+        if self.structured_sampling:
+            selected_entries = self._select_structured_entries(candidate_agents, main_agent)
+        else:
+            selected_entries = self._select_unstructured_entries(
+                available_entries,
+                num_views_to_sample=num_views_to_sample,
+                main_agent=main_agent,
+            )
 
         views = []
         for entry in selected_entries:
@@ -339,19 +546,19 @@ class OPV2VCoopDataset(BaseDataset):
                 additional_quantities=None,
             )
 
-            views.append(
-                dict(
-                    img=image,
-                    depthmap=depthmap.astype(np.float32),
-                    camera_pose=camera_pose,
-                    camera_intrinsics=intrinsics.astype(np.float32),
-                    dataset=self.dataset_name,
-                    label=os.path.join(sequence, main_agent),
-                    instance=os.path.join(
-                        frame_id, f"{entry['cam_key']}_{entry['agent_id']}"
-                    ),
-                )
+            view = dict(
+                img=image,
+                depthmap=depthmap.astype(np.float32),
+                camera_pose=camera_pose,
+                camera_intrinsics=intrinsics.astype(np.float32),
+                dataset=self.dataset_name,
+                label=os.path.join(sequence, main_agent),
+                instance=os.path.join(frame_id, f"{entry['cam_key']}_{entry['agent_id']}"),
             )
+            if self.emit_identity_metadata or self.structured_sampling:
+                view["agent_index"] = int(entry.get("agent_index", 0))
+                view["camera_index"] = int(entry["camera_index"])
+            views.append(view)
 
         return views
 

@@ -87,6 +87,8 @@ def loss_of_one_batch_multi_view(
                 "true_shape",
                 "rng",
                 "data_norm_type",
+                "agent_id",
+                "camera_id",
             ]
         )
     for view in batch:
