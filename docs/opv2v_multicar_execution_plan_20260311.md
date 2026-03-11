@@ -269,6 +269,6 @@
 
 ### 下一步
 
-- [ ] 用 `mix40` 配置启动正式训练
+- [x] 已用 `mix40` 配置启动正式训练：`opv2v_coop_stagea_long_bs160_mix40_run1`（PID `3104211`，当前在做场景预过滤初始化）
 - [ ] 在相同 epoch 快照上复用固定 `20` 帧评测，比较 `base / near40 / mix40`
 - [ ] 如果 `mix40` 仍有明显尺度偏差，再补“跨车 baseline / rig-consistency”损失

@@ -196,6 +196,6 @@
 
 ## 5. 下一版验证计划
 
-- [ ] 启动 `mix40` 正式训练
+- [x] 已启动 `mix40` 正式训练：`opv2v_coop_stagea_long_bs160_mix40_run1`（PID `3104211`）
 - [ ] 在相同 epoch 快照上复用固定 `20` 帧评测
 - [ ] 如果混合 curriculum 仍有明显 `scale_err` 偏差，再补“跨车 baseline / rig-consistency”损失
