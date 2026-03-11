@@ -108,6 +108,14 @@
 - [x] 提交号：`367cae2`
 - [x] 仓库：`insomniacs01/map`
 
+### 4.4 单卡高吞吐校准（2026-03-11 下午）
+- [x] 已确认此前 GPU 没跑满的直接原因不是代码空转，而是 `max_num_of_imgs_per_gpu=8` 且 `num_views=8`，实际只形成 `1 sample / GPU step`
+- [x] 已完成 `16 / 24 / 32 / 64 / 96 / 128 / 160` 档位探针
+- [x] 已确认 `176 / 184 / 192 / 224` 会 OOM
+- [x] 当前安全稳定上限为 `max_num_of_imgs_per_gpu=160`
+- [x] `160` 档位稳定运行约 30+ step，显存约 `19.7GB`，单步时间约 `2.8~2.9s`
+- [x] 使用 `160` 重启正式长跑并重新观察收敛
+
 ---
 
 ## 第五阶段：当前正在执行的训练任务
@@ -138,6 +146,24 @@
 - [ ] 比较精修前后的深度边界、位姿和尺度表现
 - 目录：
   - `/media/tsinghua3090/66c73fca-acad-4d88-a5b9-47aa246d1d02/qqxluca/map-anything3_experiments/opv2v_coop_stageb_resume1`
+
+### 5.4 Stage A-long：单卡高吞吐基线（`bs160`）
+- [x] 已启动
+- [x] 已进入训练 iteration
+- [ ] 跑完整个 8 epoch
+- [ ] 记录中期验证 loss 与最终 `checkpoint-best.pth`
+- [ ] 与低吞吐版本比较收敛速度和点云稳定性
+- 目录：
+  - `/media/tsinghua3090/66c73fca-acad-4d88-a5b9-47aa246d1d02/qqxluca/map-anything3_experiments/opv2v_coop_stagea_long_bs160_run1`
+
+### 5.5 Stage A-long-近邻版：高吞吐 `near40` 对照（`bs160`）
+- [x] 已启动
+- [x] 已进入训练 iteration
+- [ ] 跑完整个 8 epoch
+- [ ] 对比它和 `bs160` 基线的验证表现
+- [ ] 判断“先吃满单卡再做 near40 对照”是否带来更稳定点云
+- 目录：
+  - `/media/tsinghua3090/66c73fca-acad-4d88-a5b9-47aa246d1d02/qqxluca/map-anything3_experiments/opv2v_coop_stagea_long_bs160_near40_run1`
 
 ---
 

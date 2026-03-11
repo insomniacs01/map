@@ -97,3 +97,25 @@
 换句话说：
 - **结构化采样 + 身份嵌入 + pairwise loss** 已经把方向纠正过来了；
 - 接下来主要是按照 Stage A / Stage B 跑完，并做点云可视化验收。
+
+## 补充发现：为什么 GPU 没跑满
+
+之前显卡利用率不高，主要不是 dataloader 卡死，也不是模型没有真正训练，而是当前 long 配置在采样器里被折算成了 **每卡每步只有 1 个样本**：
+
+- `dataset.num_views = 8`
+- `train_params.max_num_of_imgs_per_gpu = 8`
+- `easy_dataset.py` 里实际 batch size 计算为 `max_num_of_imgs_per_gpu // num_views`
+- 所以当时真实 batch size = `8 // 8 = 1 sample / GPU`
+
+这会带来两个直接后果：
+
+1. 单步显存只用到约 `8.6GB`，GPU 计算波峰很短，所以 `nvidia-smi` 看起来像“没跑满”。
+2. 虽然训练本身是正常推进的，但单卡吞吐明显偏低，不利于做更长、更有说服力的实验。
+
+已经完成的探针结果表明：
+
+- `160` 是当前 `224x126 / 8 views / lowmem / encoder frozen` 设置下的稳定高吞吐上限
+- 该档位约使用 `19.7GB` 显存
+- `176` 及以上开始 OOM
+
+因此，接下来的正式长跑应优先使用 `max_num_of_imgs_per_gpu=160`，先把单卡真正吃满，再决定是否扩展到更多 GPU。
