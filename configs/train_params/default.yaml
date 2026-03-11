@@ -2,6 +2,8 @@
 seed: 0
 # Maximum number of images per GPU (changes based on available GPU memory)
 max_num_of_imgs_per_gpu: 48
+# Optional cap for validation/test images per GPU. Falls back to max_num_of_imgs_per_gpu.
+max_num_of_test_imgs_per_gpu: null
 # Accumulate gradient iterations (for increasing the effective batch size under memory constraints)
 accum_iter: 1
 # Maximum number of epochs for the scheduler

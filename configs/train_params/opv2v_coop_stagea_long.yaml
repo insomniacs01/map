@@ -3,6 +3,7 @@ defaults:
 
 seed: 0
 max_num_of_imgs_per_gpu: 160
+max_num_of_test_imgs_per_gpu: 160
 accum_iter: 1
 epochs: 8
 lr: 1e-5
@@ -19,7 +20,7 @@ eval_freq: 1
 save_freq: 1
 keep_freq: 2
 print_freq: 50
-resume: False
+resume: True
 submodule_configs:
   encoder:
     lr: 0

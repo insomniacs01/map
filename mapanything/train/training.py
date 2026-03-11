@@ -86,9 +86,15 @@ def train(args):
         max_num_of_imgs_per_gpu=args.train_params.max_num_of_imgs_per_gpu,
     )
     print("Building test dataset {:s}".format(args.dataset.test_dataset))
-    test_batch_size = 2 * (
-        args.train_params.max_num_of_imgs_per_gpu // args.dataset.num_views
-    )  # Since we don't have any backward overhead
+    test_num_views = args.dataset.num_views
+    if isinstance(test_num_views, list):
+        test_num_views = max(test_num_views)
+    test_max_num_of_imgs_per_gpu = getattr(
+        args.train_params, "max_num_of_test_imgs_per_gpu", None
+    )
+    if test_max_num_of_imgs_per_gpu is None:
+        test_max_num_of_imgs_per_gpu = args.train_params.max_num_of_imgs_per_gpu
+    test_batch_size = max(1, test_max_num_of_imgs_per_gpu // test_num_views)
     data_loader_test = {
         dataset.split("(")[0]: build_dataset(
             dataset=dataset,
@@ -251,6 +257,8 @@ def train(args):
             and epoch % args.train_params.eval_freq == 0
             and epoch > 0
         ):
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
             for test_name, testset in data_loader_test.items():
                 print(f"Testing on {test_name} ...")
                 stats = test_one_epoch(
