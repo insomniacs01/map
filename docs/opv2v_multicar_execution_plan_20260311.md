@@ -168,7 +168,7 @@
 - [x] 已启动
 - [x] 已进入训练 iteration
 - [ ] 跑完整个 8 epoch
-- [ ] 对比它和 `bs160` 基线的验证表现
+- [x] 对比它和 `bs160` 基线的验证表现
 - [ ] 判断“先吃满单卡再做 near40 对照”是否带来更稳定点云
 - 目录：
   - `/media/tsinghua3090/66c73fca-acad-4d88-a5b9-47aa246d1d02/qqxluca/map-anything3_experiments/opv2v_coop_stagea_long_bs160_near40_run1`
@@ -185,7 +185,7 @@
 - [ ] 重点看：
   - [ ] pose translation
   - [ ] pose quaternion
-  - [ ] scale
+  - [x] `scale_to_gt_*`
   - [ ] depth / pts3d / cam_pts3d
 
 ### 6.2 点云可视化验收
@@ -225,7 +225,7 @@
 - [ ] 进一步强化跨车相对位姿监督
 
 ### 7.3 更可靠的评估工具
-- [ ] 检查 `scripts/batch_eval.py` 是否可直接复用
+- [x] 修正 `scripts/batch_eval.py` 的 OPV2V 尺度口径，现已可复用于 `scale_to_gt_*` 正式评测
 - [ ] 如果现有脚本不稳定，补一个最小可用的多车点云导出/可视化脚本
 
 ---
@@ -249,10 +249,12 @@
 ### 已完成确认
 
 - [x] 完成固定 `20` 帧、固定快照的正式对比评测：`eval_bs160_epoch0_test20_seed42`
-- [x] 确认 `near40` 不是“全面更好”，而是明显 trade-off：
+- [x] 修正 `scripts/batch_eval.py` 中 OPV2V 尺度口径，并完成重跑：`eval_bs160_epoch0_test20_seed42_scalefix`
+- [x] 确认 `near40` 依然不是“全面更好”，而是更清晰的 trade-off（此前“尺度变差”的判断是由 legacy `scale_err = |s-1|` 误导出来的）：
   - [x] pose/depth 略优：`pose_abs 20.31 -> 20.06`，`pose_rot 5.09 -> 4.83`，`depth_rmse 16.51 -> 16.31`
-  - [x] scale/点云几何更差：`scale_err 3.43 -> 5.39`，`chamfer_filtered_pred_to_gt 1.569 -> 1.587`
-  - [x] `bev_iou_filtered` 也略差：`0.2677 -> 0.2655`
+  - [x] 几何侧仍未显示稳定优势：`chamfer_filtered_pred_to_gt 1.569 -> 1.588`，`bev_iou_filtered 0.2677 -> 0.2655`
+  - [x] 修正后的尺度其实更好：`scale_to_gt_err 0.8016 -> 0.7147`，`scale_to_gt_log_err 1.7260 -> 1.3611`，`scale_to_gt_eq_rel_err 5.5281 -> 3.5328`
+  - [x] 帧级统计也一致：`near40` 在 `20/20` 帧上都优于 `base`（按 `scale_to_gt_err / log / eq_rel`）
 - [x] 量化 `train` split 距离截断影响：
   - [x] 原始同帧 `>=2 agents`：`6374`
   - [x] `<=40m` 后仍可用于 `2 agents x 4 cams` 结构化采样：`4690 / 6374 = 73.6%`
@@ -271,4 +273,4 @@
 
 - [x] 已用 `mix40` 配置启动正式训练：`opv2v_coop_stagea_long_bs160_mix40_run1`（PID `3104211`，当前在做场景预过滤初始化）
 - [ ] 在相同 epoch 快照上复用固定 `20` 帧评测，比较 `base / near40 / mix40`
-- [ ] 如果 `mix40` 仍有明显尺度偏差，再补“跨车 baseline / rig-consistency”损失
+- [ ] 如果 `mix40` 仍有明显 `scale_to_gt_*` 偏差，再补“跨车 baseline / rig-consistency”损失

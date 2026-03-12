@@ -151,15 +151,21 @@
 
 ## 1. 固定 20 帧正式评测结论
 
-- 评测目录：`/media/tsinghua3090/66c73fca-acad-4d88-a5b9-47aa246d1d02/qqxluca/map-anything3_experiments/eval_bs160_epoch0_test20_seed42`
-- `base`：`pose_abs=20.31`，`pose_rot=5.09`，`depth_rmse=16.51`，`depth_mae=9.35`，`scale_err=3.43`，`bev_iou_filtered=0.2677`
-- `near40`：`pose_abs=20.06`，`pose_rot=4.83`，`depth_rmse=16.31`，`depth_mae=9.26`，`scale_err=5.39`，`bev_iou_filtered=0.2655`
+- 原始评测目录：`/media/tsinghua3090/66c73fca-acad-4d88-a5b9-47aa246d1d02/qqxluca/map-anything3_experiments/eval_bs160_epoch0_test20_seed42`
+- 修正尺度口径后的评测目录：`/media/tsinghua3090/66c73fca-acad-4d88-a5b9-47aa246d1d02/qqxluca/map-anything3_experiments/eval_bs160_epoch0_test20_seed42_scalefix`
+- `base`：`pose_abs=20.31`，`pose_rot=5.09`，`depth_rmse=16.51`，`depth_mae=9.35`，`bev_iou_filtered=0.2677`
+- `near40`：`pose_abs=20.06`，`pose_rot=4.83`，`depth_rmse=16.31`，`depth_mae=9.26`，`bev_iou_filtered=0.2655`
+- 已确认此前引用的 `scale_err = |s-1|` 是 legacy 口径，不适用于 OPV2V；正确口径应为基于 GT 的 `scale_to_gt_*`
 
-结论：
+修正后的结论：
 
 1. `near40` 的确在 pose/depth 上略优。
-2. 但 `near40` 会明显恶化尺度误差，并且点云几何指标没有同步改善。
-3. 所以“把多车样本裁到近距离”只能解决一部分 overlap 问题，不能单独解决点云不可用问题。
+2. 几何指标没有同步改善：`chamfer_filtered_pred_to_gt 1.569 -> 1.588`，`bev_iou_filtered 0.2677 -> 0.2655`。
+3. 此前“`near40` 尺度更差”的判断是错的；按正确尺度口径，`near40` 反而更好：
+   - `scale_to_gt_err: 0.8016 -> 0.7147`（`20/20` 帧更优）
+   - `scale_to_gt_log_err: 1.7260 -> 1.3611`（`20/20` 帧更优）
+   - `scale_to_gt_eq_rel_err: 5.5281 -> 3.5328`（`20/20` 帧更优）
+4. 因此当前真正的 trade-off 是：`near40` 提升了 pose/depth 和尺度，但没有带来更好的跨车几何融合。
 
 ## 2. 距离截断的真实代价
 
@@ -189,6 +195,7 @@
 
 ## 4. 新增代码级修复
 
+- [x] 修正 `scripts/batch_eval.py` 的 OPV2V 尺度定义：从 legacy `|s-1|` 改为基于 GT 的 `scale_to_gt_*`
 - [x] 在 `OPV2VCoopDataset` 初始化阶段增加距离/视角约束后的场景预过滤
 - [x] 目的：避免 `Need 2 agents after filtering but got 1` 的无效样本在训练中反复重试
 - [x] 新增 `configs/dataset/opv2v_coop_ft_structured_stagea_mix40.yaml`
@@ -197,5 +204,5 @@
 ## 5. 下一版验证计划
 
 - [x] 已启动 `mix40` 正式训练：`opv2v_coop_stagea_long_bs160_mix40_run1`（PID `3104211`）
-- [ ] 在相同 epoch 快照上复用固定 `20` 帧评测
-- [ ] 如果混合 curriculum 仍有明显 `scale_err` 偏差，再补“跨车 baseline / rig-consistency”损失
+- [x] 在相同 epoch 快照上复用固定 `20` 帧评测（已完成 `base / near40` 的 corrected scale rerun）
+- [ ] 如果混合 curriculum 仍有明显 `scale_to_gt_*` 偏差，再补“跨车 baseline / rig-consistency”损失

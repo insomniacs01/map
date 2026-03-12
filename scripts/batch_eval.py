@@ -76,6 +76,18 @@ class EvalResult:
     depth_mae: float
     depth_rel: float
     scale_err: float | None
+    scale_log_err: float | None = None
+    scale_eq_rel_err: float | None = None
+    scale_ratio_mean: float | None = None
+    scale_ratio_median: float | None = None
+    scale_ratio_p90: float | None = None
+    scale_gt_factor: float | None = None
+    scale_to_gt_err: float | None = None
+    scale_to_gt_log_err: float | None = None
+    scale_to_gt_eq_rel_err: float | None = None
+    scale_to_gt_ratio_mean: float | None = None
+    scale_to_gt_ratio_median: float | None = None
+    scale_to_gt_ratio_p90: float | None = None
     chamfer_pred_to_gt: float | None = None
     chamfer_gt_to_pred: float | None = None
     chamfer_filtered_pred_to_gt: float | None = None
@@ -346,7 +358,135 @@ def depth_metrics(predictions, gt_depths: List[torch.Tensor]) -> Tuple[float, fl
     return float(np.mean(rmse_vals)), float(np.mean(mae_vals)), float(np.mean(rel_vals))
 
 
-def scale_metric(predictions) -> float | None:
+def _gt_scale_factor_from_raw_views(raw_views: Sequence[Dict]) -> float | None:
+    if not raw_views:
+        return None
+    if "camera_poses" not in raw_views[0]:
+        return None
+
+    pose_ref = np.asarray(raw_views[0]["camera_poses"], dtype=np.float64)
+    if pose_ref.shape != (4, 4):
+        return None
+    pose_ref_inv = np.linalg.inv(pose_ref)
+
+    total_sum = 0.0
+    total_cnt = 0
+    for rv in raw_views:
+        depth = rv.get("depth_z")
+        intr = rv.get("intrinsics")
+        pose = rv.get("camera_poses")
+        if depth is None or intr is None or pose is None:
+            continue
+
+        depth = np.asarray(depth, dtype=np.float64)
+        intr = np.asarray(intr, dtype=np.float64)
+        pose = np.asarray(pose, dtype=np.float64)
+        if pose.shape != (4, 4) or intr.shape != (3, 3):
+            continue
+
+        T_ref_cur = pose_ref_inv @ pose
+        R = T_ref_cur[:3, :3]
+        t = T_ref_cur[:3, 3]
+
+        valid = depth > 0.0
+        v, u = np.nonzero(valid)
+        if v.size == 0:
+            continue
+
+        z = depth[v, u]
+        fx, fy = float(intr[0, 0]), float(intr[1, 1])
+        cx, cy = float(intr[0, 2]), float(intr[1, 2])
+        if fx == 0.0 or fy == 0.0:
+            continue
+
+        x = (u - cx) * z / fx
+        y = (v - cy) * z / fy
+        pts = np.stack([x, y, z], axis=0)
+        pts_ref = (R @ pts) + t.reshape(3, 1)
+        dis = np.linalg.norm(pts_ref, axis=0)
+        total_sum += float(dis.sum())
+        total_cnt += int(dis.size)
+
+    if total_cnt <= 0:
+        return None
+    return total_sum / float(total_cnt)
+
+
+def _pred_scale_factor_from_predictions(
+    predictions: Sequence[dict],
+    gt_depths: Sequence[torch.Tensor],
+) -> float | None:
+    if not predictions or not gt_depths:
+        return None
+    if len(gt_depths) < len(predictions):
+        return None
+
+    ref = predictions[0].get("camera_poses")
+    if ref is None:
+        return None
+    try:
+        pose_ref = np.asarray(ref[0].detach().cpu().numpy(), dtype=np.float64)
+        pose_ref_inv = np.linalg.inv(pose_ref)
+    except Exception:
+        return None
+
+    total_sum = 0.0
+    total_cnt = 0
+    for pred, gt in zip(predictions, gt_depths):
+        depth_t = pred.get("depth_z")
+        intr_t = pred.get("intrinsics")
+        pose_t = pred.get("camera_poses")
+        if depth_t is None or intr_t is None or pose_t is None:
+            continue
+
+        try:
+            depth = np.asarray(depth_t[0].squeeze(-1).detach().cpu().numpy(), dtype=np.float64)
+            intr = np.asarray(intr_t[0].detach().cpu().numpy(), dtype=np.float64)
+            pose = np.asarray(pose_t[0].detach().cpu().numpy(), dtype=np.float64)
+            gt_depth = np.asarray(gt.squeeze(0).detach().cpu().numpy(), dtype=np.float64)
+        except Exception:
+            continue
+
+        if intr.shape != (3, 3) or pose.shape != (4, 4):
+            continue
+
+        try:
+            T_ref_cur = pose_ref_inv @ pose
+        except Exception:
+            continue
+        R = T_ref_cur[:3, :3]
+        t = T_ref_cur[:3, 3]
+
+        valid = (gt_depth > 0.0) & np.isfinite(depth) & (depth > 0.0)
+        v, u = np.nonzero(valid)
+        if v.size == 0:
+            continue
+
+        z = depth[v, u]
+        fx, fy = float(intr[0, 0]), float(intr[1, 1])
+        cx, cy = float(intr[0, 2]), float(intr[1, 2])
+        if fx == 0.0 or fy == 0.0:
+            continue
+
+        x = (u - cx) * z / fx
+        y = (v - cy) * z / fy
+        pts = np.stack([x, y, z], axis=0)
+        pts_ref = (R @ pts) + t.reshape(3, 1)
+        dis = np.linalg.norm(pts_ref, axis=0)
+        total_sum += float(dis.sum())
+        total_cnt += int(dis.size)
+
+    if total_cnt <= 0:
+        return None
+    return total_sum / float(total_cnt)
+
+
+def scale_metric_details(
+    predictions,
+    *,
+    gt_scale_factor: float | None = None,
+    fallback_scale_factor: float | None = None,
+) -> Dict[str, float] | None:
     vals = []
     for pred in predictions:
         scale = pred.get("metric_scaling_factor")
@@ -354,9 +494,62 @@ def scale_metric(predictions) -> float | None:
             continue
         if isinstance(scale, torch.Tensor):
             vals.append(scale.mean().item())
+    used_fallback = False
     if not vals:
-        return None
-    return float(np.mean([abs(v - 1.0) for v in vals]))
+        if (
+            fallback_scale_factor is not None
+            and isinstance(fallback_scale_factor, (int, float))
+            and math.isfinite(float(fallback_scale_factor))
+            and float(fallback_scale_factor) > 1e-8
+        ):
+            used_fallback = True
+            vals = [float(fallback_scale_factor)] * max(1, len(predictions))
+        else:
+            return None
+
+    ratios = np.asarray(vals, dtype=np.float64)
+    ratios = np.clip(ratios, 1e-8, None)
+    out: Dict[str, float] = {}
+    if not used_fallback:
+        abs_rel = np.abs(ratios - 1.0)
+        abs_log = np.abs(np.log(ratios))
+        mean_abs_log = float(np.mean(abs_log))
+        out.update(
+            {
+                "scale_err": float(np.mean(abs_rel)),
+                "scale_log_err": mean_abs_log,
+                "scale_eq_rel_err": float(np.expm1(mean_abs_log)),
+                "scale_ratio_mean": float(np.mean(ratios)),
+                "scale_ratio_median": float(np.median(ratios)),
+                "scale_ratio_p90": float(np.quantile(ratios, 0.9)),
+            }
+        )
+
+    if (
+        gt_scale_factor is not None
+        and isinstance(gt_scale_factor, (int, float))
+        and math.isfinite(float(gt_scale_factor))
+        and float(gt_scale_factor) > 1e-8
+    ):
+        g = float(gt_scale_factor)
+        ratio_to_gt = ratios / g
+        ratio_to_gt = np.clip(ratio_to_gt, 1e-8, None)
+        abs_rel_gt = np.abs(ratio_to_gt - 1.0)
+        abs_log_gt = np.abs(np.log(ratio_to_gt))
+        mean_abs_log_gt = float(np.mean(abs_log_gt))
+        out.update(
+            {
+                "scale_gt_factor": g,
+                "scale_to_gt_err": float(np.mean(abs_rel_gt)),
+                "scale_to_gt_log_err": mean_abs_log_gt,
+                "scale_to_gt_eq_rel_err": float(np.expm1(mean_abs_log_gt)),
+                "scale_to_gt_ratio_mean": float(np.mean(ratio_to_gt)),
+                "scale_to_gt_ratio_median": float(np.median(ratio_to_gt)),
+                "scale_to_gt_ratio_p90": float(np.quantile(ratio_to_gt, 0.9)),
+            }
+        )
+
+    return out
 
 
 def _filter_points(
@@ -517,7 +710,18 @@ def evaluate_model_on_frames(
             pred_points, _ = predictions_to_pointcloud(predictions, colorize=True)
             pose_abs, pose_rot = _compute_pose_metrics(predictions, camera_info)
             depth_rmse, depth_mae, depth_rel = depth_metrics(predictions, gt_depths)
-            scale_err = scale_metric(predictions)
+            gt_scale_factor = _gt_scale_factor_from_raw_views(raw_views)
+            pred_scale_fallback = None
+            if (
+                gt_scale_factor is not None
+                and not any(p.get("metric_scaling_factor") is not None for p in predictions)
+            ):
+                pred_scale_fallback = _pred_scale_factor_from_predictions(predictions, gt_depths)
+            scale_details = scale_metric_details(
+                predictions,
+                gt_scale_factor=gt_scale_factor,
+                fallback_scale_factor=pred_scale_fallback,
+            )
             detection_metrics = {}
             if pc_metrics_cfg:
                 if pc_metrics_cfg.save_dir:
@@ -542,7 +746,19 @@ def evaluate_model_on_frames(
                     depth_rmse=depth_rmse,
                     depth_mae=depth_mae,
                     depth_rel=depth_rel,
-                    scale_err=scale_err,
+                    scale_err=(scale_details.get("scale_err") if scale_details is not None else None),
+                    scale_log_err=(scale_details.get("scale_log_err") if scale_details is not None else None),
+                    scale_eq_rel_err=(scale_details.get("scale_eq_rel_err") if scale_details is not None else None),
+                    scale_ratio_mean=(scale_details.get("scale_ratio_mean") if scale_details is not None else None),
+                    scale_ratio_median=(scale_details.get("scale_ratio_median") if scale_details is not None else None),
+                    scale_ratio_p90=(scale_details.get("scale_ratio_p90") if scale_details is not None else None),
+                    scale_gt_factor=(gt_scale_factor if gt_scale_factor is not None else None),
+                    scale_to_gt_err=(scale_details.get("scale_to_gt_err") if scale_details is not None else None),
+                    scale_to_gt_log_err=(scale_details.get("scale_to_gt_log_err") if scale_details is not None else None),
+                    scale_to_gt_eq_rel_err=(scale_details.get("scale_to_gt_eq_rel_err") if scale_details is not None else None),
+                    scale_to_gt_ratio_mean=(scale_details.get("scale_to_gt_ratio_mean") if scale_details is not None else None),
+                    scale_to_gt_ratio_median=(scale_details.get("scale_to_gt_ratio_median") if scale_details is not None else None),
+                    scale_to_gt_ratio_p90=(scale_details.get("scale_to_gt_ratio_p90") if scale_details is not None else None),
                     chamfer_pred_to_gt=detection_metrics.get("chamfer_pred_to_gt"),
                     chamfer_gt_to_pred=detection_metrics.get("chamfer_gt_to_pred"),
                     chamfer_filtered_pred_to_gt=detection_metrics.get("chamfer_filtered_pred_to_gt"),
@@ -593,6 +809,19 @@ def summarize_results(results: Dict[str, List[EvalResult]]) -> Dict[str, Dict[st
             "depth_mae_mean": float(np.nanmean([v.depth_mae for v in values])),
             "depth_rel_mean": float(np.nanmean([v.depth_rel for v in values])),
             "scale_err_mean": float(np.nanmean([v.scale_err for v in values if v.scale_err is not None])) if any(v.scale_err is not None for v in values) else float("nan"),
+            "scale_log_err_mean": _attr_mean("scale_log_err"),
+            "scale_eq_rel_err_mean": _attr_mean("scale_eq_rel_err"),
+            "scale_ratio_mean": _attr_mean("scale_ratio_mean"),
+            "scale_ratio_median_mean": _attr_mean("scale_ratio_median"),
+            "scale_ratio_p90_mean": _attr_mean("scale_ratio_p90"),
+            "scale_gt_factor_mean": _attr_mean("scale_gt_factor"),
+            "scale_to_gt_err_mean": _attr_mean("scale_to_gt_err"),
+            "scale_to_gt_log_err_mean": _attr_mean("scale_to_gt_log_err"),
+            "scale_to_gt_eq_rel_err_mean": _attr_mean("scale_to_gt_eq_rel_err"),
+            "scale_to_gt_mult_err_mean": float("nan"),
+            "scale_to_gt_ratio_mean": _attr_mean("scale_to_gt_ratio_mean"),
+            "scale_to_gt_ratio_median_mean": _attr_mean("scale_to_gt_ratio_median"),
+            "scale_to_gt_ratio_p90_mean": _attr_mean("scale_to_gt_ratio_p90"),
             "chamfer_pred_to_gt_mean": _attr_mean("chamfer_pred_to_gt"),
             "chamfer_gt_to_pred_mean": _attr_mean("chamfer_gt_to_pred"),
             "chamfer_filtered_pred_to_gt_mean": _attr_mean("chamfer_filtered_pred_to_gt"),
@@ -600,6 +829,9 @@ def summarize_results(results: Dict[str, List[EvalResult]]) -> Dict[str, Dict[st
             "bev_iou_raw_mean": _attr_mean("bev_iou_raw"),
             "bev_iou_filtered_mean": _attr_mean("bev_iou_filtered"),
         }
+        eq_rel_gt = summary[mode].get("scale_to_gt_eq_rel_err_mean")
+        if isinstance(eq_rel_gt, (int, float)) and math.isfinite(float(eq_rel_gt)):
+            summary[mode]["scale_to_gt_mult_err_mean"] = float(eq_rel_gt) + 1.0
     return summary
 
 
@@ -621,6 +853,18 @@ def save_metrics_csv(results: Dict[str, List[EvalResult]], out_dir: Path, model_
                     "depth_mae",
                     "depth_rel",
                     "scale_err",
+                    "scale_log_err",
+                    "scale_eq_rel_err",
+                    "scale_ratio_mean",
+                    "scale_ratio_median",
+                    "scale_ratio_p90",
+                    "scale_gt_factor",
+                    "scale_to_gt_err",
+                    "scale_to_gt_log_err",
+                    "scale_to_gt_eq_rel_err",
+                    "scale_to_gt_ratio_mean",
+                    "scale_to_gt_ratio_median",
+                    "scale_to_gt_ratio_p90",
                     "chamfer_pred_to_gt",
                     "chamfer_gt_to_pred",
                     "chamfer_filtered_pred_to_gt",
@@ -640,6 +884,18 @@ def save_metrics_csv(results: Dict[str, List[EvalResult]], out_dir: Path, model_
                         f"{v.depth_mae:.6f}",
                         f"{v.depth_rel:.6f}",
                         f"{v.scale_err:.6f}" if v.scale_err is not None else "nan",
+                        f"{v.scale_log_err:.6f}" if v.scale_log_err is not None else "nan",
+                        f"{v.scale_eq_rel_err:.6f}" if v.scale_eq_rel_err is not None else "nan",
+                        f"{v.scale_ratio_mean:.6f}" if v.scale_ratio_mean is not None else "nan",
+                        f"{v.scale_ratio_median:.6f}" if v.scale_ratio_median is not None else "nan",
+                        f"{v.scale_ratio_p90:.6f}" if v.scale_ratio_p90 is not None else "nan",
+                        f"{v.scale_gt_factor:.6f}" if v.scale_gt_factor is not None else "nan",
+                        f"{v.scale_to_gt_err:.6f}" if v.scale_to_gt_err is not None else "nan",
+                        f"{v.scale_to_gt_log_err:.6f}" if v.scale_to_gt_log_err is not None else "nan",
+                        f"{v.scale_to_gt_eq_rel_err:.6f}" if v.scale_to_gt_eq_rel_err is not None else "nan",
+                        f"{v.scale_to_gt_ratio_mean:.6f}" if v.scale_to_gt_ratio_mean is not None else "nan",
+                        f"{v.scale_to_gt_ratio_median:.6f}" if v.scale_to_gt_ratio_median is not None else "nan",
+                        f"{v.scale_to_gt_ratio_p90:.6f}" if v.scale_to_gt_ratio_p90 is not None else "nan",
                         f"{v.chamfer_pred_to_gt:.6f}" if v.chamfer_pred_to_gt is not None else "nan",
                         f"{v.chamfer_gt_to_pred:.6f}" if v.chamfer_gt_to_pred is not None else "nan",
                         f"{v.chamfer_filtered_pred_to_gt:.6f}" if v.chamfer_filtered_pred_to_gt is not None else "nan",
