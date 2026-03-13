@@ -685,6 +685,231 @@ class NonAmbiguousMaskLoss(Criterion, MultiLoss):
         return Sum(*loss_list), (mask_loss_details | {})
 
 
+class RelativePoseMetricLoss(MultiLoss):
+    """Direct supervision on relative camera poses in metric space."""
+
+    def __init__(
+        self,
+        *,
+        trans_weight: float = 1.0,
+        rot_weight: float = 0.0,
+        only_cross_agent: bool = False,
+        squared: bool = False,
+    ):
+        super().__init__()
+        self.trans_weight = float(trans_weight)
+        self.rot_weight = float(rot_weight)
+        self.only_cross_agent = bool(only_cross_agent)
+        self.squared = bool(squared)
+
+    def get_name(self):
+        args = (
+            f"trans_weight={self.trans_weight:g},"
+            f"rot_weight={self.rot_weight:g},"
+            f"only_cross_agent={self.only_cross_agent},"
+            f"squared={self.squared}"
+        )
+        return f"{type(self).__name__}({args})"
+
+    @staticmethod
+    def _rotation_angle_deg_from_quats_xyzw(
+        q_pred: torch.Tensor, q_gt: torch.Tensor
+    ) -> torch.Tensor:
+        eps = 1e-4
+        q_pred = torch.nan_to_num(q_pred, nan=0.0, posinf=0.0, neginf=0.0)
+        q_gt = torch.nan_to_num(q_gt, nan=0.0, posinf=0.0, neginf=0.0)
+        q_pred = q_pred / q_pred.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+        q_gt = q_gt / q_gt.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+        dot = (q_pred * q_gt).sum(dim=-1).abs().clamp(min=0.0, max=1.0)
+        dot_grad = dot.clamp(max=1.0 - eps)
+        dot_safe = dot_grad + (dot - dot_grad).detach()
+        ang = 2.0 * torch.acos(dot_safe)
+        return ang * (180.0 / math.pi)
+
+    @staticmethod
+    def _parse_agent_id(instance: str | None) -> str | None:
+        if not instance:
+            return None
+        last = str(instance).split('/')[-1]
+        if '_' not in last:
+            return None
+        return last.split('_')[-1]
+
+    def _get_agent_ids(self, instances, batch_size: int) -> list[str | None]:
+        if instances is None:
+            return [None] * batch_size
+        if isinstance(instances, (list, tuple)):
+            if len(instances) == batch_size:
+                return [self._parse_agent_id(s) for s in instances]
+            if batch_size == 1 and len(instances) > 0:
+                return [self._parse_agent_id(instances[0])]
+        return [self._parse_agent_id(instances)] * batch_size
+
+    def compute_loss(self, batch, preds, **kw):
+        n_views = len(batch)
+        if n_views < 2:
+            return torch.zeros((), device=preds[0]['cam_trans'].device)
+
+        device = preds[0]['cam_trans'].device
+        q0 = torch.nan_to_num(preds[0]['cam_quats'].float(), nan=0.0, posinf=0.0, neginf=0.0)
+        t0 = torch.nan_to_num(preds[0]['cam_trans'].float(), nan=0.0, posinf=0.0, neginf=0.0)
+        gt_q0 = batch[0]['camera_pose_quats'].float()
+        gt_t0 = batch[0]['camera_pose_trans'].float()
+        batch_size = int(t0.shape[0])
+
+        only_cross_agent = self.only_cross_agent
+        agent_ids0 = self._get_agent_ids(batch[0].get('instance'), batch_size)
+
+        trans_losses = []
+        rot_losses = []
+        cross_count = 0
+
+        for view_idx in range(1, n_views):
+            q_rel, t_rel = transform_pose_using_quats_and_trans_2_to_1(
+                q0,
+                t0,
+                torch.nan_to_num(preds[view_idx]['cam_quats'].float(), nan=0.0, posinf=0.0, neginf=0.0),
+                torch.nan_to_num(preds[view_idx]['cam_trans'].float(), nan=0.0, posinf=0.0, neginf=0.0),
+            )
+            gt_q_rel, gt_t_rel = transform_pose_using_quats_and_trans_2_to_1(
+                gt_q0,
+                gt_t0,
+                batch[view_idx]['camera_pose_quats'].float(),
+                batch[view_idx]['camera_pose_trans'].float(),
+            )
+
+            t_err = torch.linalg.norm((t_rel - gt_t_rel).float(), dim=-1)
+            t_err = torch.nan_to_num(t_err, nan=1.0e4, posinf=1.0e4, neginf=1.0e4)
+            if self.squared:
+                t_err = t_err * t_err
+
+            if only_cross_agent:
+                agent_ids_i = self._get_agent_ids(batch[view_idx].get('instance'), batch_size)
+                mask_list = [
+                    (a0 is not None and ai is not None and ai != a0)
+                    for a0, ai in zip(agent_ids0, agent_ids_i)
+                ]
+                mask = torch.tensor(mask_list, dtype=torch.bool, device=device)
+                if bool(mask.any()):
+                    cross_count += int(mask.sum().item())
+                    trans_losses.append(t_err[mask].mean())
+                    if self.rot_weight > 0:
+                        rot_err = self._rotation_angle_deg_from_quats_xyzw(q_rel.float(), gt_q_rel.float())
+                        rot_err = torch.nan_to_num(rot_err, nan=1.0e4, posinf=1.0e4, neginf=1.0e4)
+                        rot_losses.append(rot_err[mask].mean())
+                continue
+
+            trans_losses.append(t_err.mean())
+            if self.rot_weight > 0:
+                rot_err = self._rotation_angle_deg_from_quats_xyzw(q_rel.float(), gt_q_rel.float())
+                rot_err = torch.nan_to_num(rot_err, nan=1.0e4, posinf=1.0e4, neginf=1.0e4)
+                rot_losses.append(rot_err.mean())
+
+        if only_cross_agent and not trans_losses:
+            for view_idx in range(1, n_views):
+                q_rel, t_rel = transform_pose_using_quats_and_trans_2_to_1(
+                    q0,
+                    t0,
+                    preds[view_idx]['cam_quats'].float(),
+                    preds[view_idx]['cam_trans'].float(),
+                )
+                gt_q_rel, gt_t_rel = transform_pose_using_quats_and_trans_2_to_1(
+                    gt_q0,
+                    gt_t0,
+                    batch[view_idx]['camera_pose_quats'].float(),
+                    batch[view_idx]['camera_pose_trans'].float(),
+                )
+                t_err = torch.linalg.norm((t_rel - gt_t_rel).float(), dim=-1)
+                t_err = torch.nan_to_num(t_err, nan=1.0e4, posinf=1.0e4, neginf=1.0e4)
+                if self.squared:
+                    t_err = t_err * t_err
+                trans_losses.append(t_err.mean())
+                if self.rot_weight > 0:
+                    rot_err = self._rotation_angle_deg_from_quats_xyzw(q_rel.float(), gt_q_rel.float())
+                    rot_err = torch.nan_to_num(rot_err, nan=1.0e4, posinf=1.0e4, neginf=1.0e4)
+                    rot_losses.append(rot_err.mean())
+
+        trans_loss = torch.stack(trans_losses, dim=0).mean() if trans_losses else torch.zeros((), device=device)
+        rot_loss = torch.stack(rot_losses, dim=0).mean() if rot_losses else torch.zeros((), device=device)
+
+        loss = self.trans_weight * trans_loss + self.rot_weight * rot_loss
+        details = {
+            f"{type(self).__name__}_trans_loss": float(trans_loss.detach().cpu()),
+            f"{type(self).__name__}_rot_loss_deg": float(rot_loss.detach().cpu()),
+        }
+        if only_cross_agent:
+            details[f"{type(self).__name__}_cross_count"] = int(cross_count)
+        return loss, details
+
+
+class VehicleMaskedPointLoss(Criterion, MultiLoss):
+    """Extra point regression focused on vehicle pixels only."""
+
+    def __init__(
+        self,
+        criterion,
+        *,
+        mask_key: str = "vehicle_mask",
+        pred_key: str = "pts3d_cam",
+        target_key: str = "pts3d_cam",
+        loss_in_log: bool = True,
+    ):
+        super().__init__(criterion)
+        self.mask_key = str(mask_key)
+        self.pred_key = str(pred_key)
+        self.target_key = str(target_key)
+        self.loss_in_log = bool(loss_in_log)
+
+    def get_name(self):
+        args = (
+            f"mask_key={self.mask_key},"
+            f"pred_key={self.pred_key},"
+            f"target_key={self.target_key},"
+            f"loss_in_log={self.loss_in_log}"
+        )
+        return f"{type(self).__name__}({self.criterion},{args})"
+
+    def compute_loss(self, batch, preds, **kw):
+        device = preds[0][self.pred_key].device
+        view_losses = []
+        total_vehicle_pixels = 0
+        details = {}
+        self_name = type(self).__name__
+
+        for view_idx, (gt, pred) in enumerate(zip(batch, preds)):
+            vehicle_mask = gt.get(self.mask_key)
+            if vehicle_mask is None:
+                continue
+            mask = vehicle_mask & gt["valid_mask"]
+            pixel_count = int(mask.sum().item())
+            details[f"{self_name}_pixels_view{view_idx + 1}"] = pixel_count
+            total_vehicle_pixels += pixel_count
+            if pixel_count == 0:
+                continue
+
+            pred_points = pred[self.pred_key][mask]
+            gt_points = gt[self.target_key][mask]
+            if self.loss_in_log:
+                pred_points = apply_log_to_norm(pred_points)
+                gt_points = apply_log_to_norm(gt_points)
+
+            loss = self.criterion(pred_points, gt_points, factor="points")
+            if loss.ndim > 0:
+                loss = loss.mean()
+            view_losses.append(loss)
+            details[f"{self_name}_view{view_idx + 1}"] = float(loss.detach().cpu())
+
+        if view_losses:
+            total_loss = torch.stack(view_losses, dim=0).mean()
+        else:
+            total_loss = torch.zeros((), device=device)
+
+        details[f"{self_name}_avg"] = float(total_loss.detach().cpu())
+        details[f"{self_name}_valid_views"] = int(len(view_losses))
+        details[f"{self_name}_pixels_total"] = int(total_vehicle_pixels)
+        return total_loss, details
+
+
 class ConfLoss(MultiLoss):
     """
     Applies confidence-weighted regression loss using model-predicted confidence values.

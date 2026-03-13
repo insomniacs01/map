@@ -36,6 +36,11 @@ ALLOWED_VIEW_KEYS = {
     "true_shape",  # Optional - original image shape
     "idx",  # Optional - index of the view
     "instance",  # Optional - instance info of the view
+    "agent_index",  # Optional - per-view agent identity index for coop checkpoints
+    "camera_index",  # Optional - per-view camera identity index for coop checkpoints
+    "camera_model",  # Optional - camera model description
+    "virtual_camera",  # Optional - parameters for virtual cameras (e.g., cylindrical)
+    "encoder_features",  # Optional - cached encoder features
 }
 
 REQUIRED_KEYS = {"img", "data_norm_type"}
@@ -83,12 +88,14 @@ def loss_of_one_batch_multi_view(
                 "dataset",
                 "label",
                 "instance",
+                "agent_id",
+                "main_agent_id",
                 "idx",
                 "true_shape",
                 "rng",
                 "data_norm_type",
-                "agent_id",
-                "camera_id",
+                "camera_model",
+                "virtual_camera",
             ]
         )
     for view in batch:
@@ -339,6 +346,8 @@ def postprocess_model_outputs_for_inference(
     ):
         # Start by copying all raw outputs
         processed_output = dict(raw_output)
+        camera_model = (original_view.get("camera_model", "pinhole") or "pinhole").lower()
+        processed_output["camera_model"] = camera_model
 
         # 1. Add denormalized images
         img = original_view["img"]  # Shape: (B, 3, H, W)
@@ -356,7 +365,10 @@ def postprocess_model_outputs_for_inference(
             processed_output["depth_z"] = processed_output["pts3d_cam"][..., 2:3]
 
         # 3. Recover pinhole camera intrinsics from ray directions if available
-        if "ray_directions" in processed_output:
+        if "ray_directions" in processed_output and camera_model in (
+            "pinhole",
+            "perspective",
+        ):
             intrinsics = recover_pinhole_intrinsics_from_ray_directions(
                 processed_output["ray_directions"]
             )

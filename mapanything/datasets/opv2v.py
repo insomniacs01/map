@@ -1,3 +1,5 @@
+import hashlib
+import json
 import os
 import sys
 from pathlib import Path
@@ -14,6 +16,7 @@ from data_processing.opv2v_pose_utils import (
     CARLA_TO_CAMERA_CV,
     cords_to_pose,
     get_camera_poses_in_ego,
+    get_vehicle_bboxes_in_ego,
     load_frame_metadata,
 )
 from mapanything.datasets.base.base_dataset import BaseDataset
@@ -25,6 +28,34 @@ def _convert_pose_to_opencv(pose: np.ndarray) -> np.ndarray:
     pose_cv[:3, :3] = basis @ pose[:3, :3] @ basis.T
     pose_cv[:3, 3] = basis @ pose[:3, 3]
     return pose_cv
+
+
+def _convert_points_to_opencv(points: np.ndarray) -> np.ndarray:
+    basis = CARLA_TO_CAMERA_CV[:3, :3]
+    return np.asarray(points) @ basis.T
+
+
+def _convert_rotation_to_opencv(rotation: np.ndarray) -> np.ndarray:
+    basis = CARLA_TO_CAMERA_CV[:3, :3]
+    return basis @ rotation @ basis.T
+
+
+def _get_vehicle_boxes_in_opencv(frame_meta: Dict) -> List[Dict]:
+    vehicle_bboxes = get_vehicle_bboxes_in_ego(frame_meta, max_range=None)
+    vehicle_boxes = []
+    for bbox in vehicle_bboxes.values():
+        vehicle_boxes.append(
+            {
+                "center": _convert_points_to_opencv(
+                    np.asarray(bbox["center"], dtype=np.float32)
+                ).astype(np.float32),
+                "rotation": _convert_rotation_to_opencv(
+                    np.asarray(bbox["rotation"], dtype=np.float32)
+                ).astype(np.float32),
+                "extent": np.asarray(bbox["extent"], dtype=np.float32),
+            }
+        )
+    return vehicle_boxes
 
 
 class OPV2VDataset(BaseDataset):
@@ -196,6 +227,7 @@ class OPV2VCoopDataset(BaseDataset):
         shuffle_views: bool = True,
         emit_identity_metadata: bool = False,
         max_scenes: int | None = None,
+        metadata_cache_dir: str | None = None,
         **kwargs,
     ):
         super().__init__(*args, split=split, **kwargs)
@@ -224,6 +256,9 @@ class OPV2VCoopDataset(BaseDataset):
         self.requested_max_num_views = max_num_views
         self.max_scenes = max_scenes
         self.dataset_name = "OPV2VCoop"
+        self.metadata_cache_dir = (
+            Path(metadata_cache_dir) if metadata_cache_dir is not None else None
+        )
 
         self.min_agents = max(1, int(min_agents))
         if self.structured_sampling and self.agents_per_sample is not None:
@@ -269,10 +304,112 @@ class OPV2VCoopDataset(BaseDataset):
                 self.num_views = self.max_dynamic_views
                 self.min_num_views_allowed = self.max_dynamic_views
 
+    def _scene_cache_path(self) -> Path | None:
+        if self.metadata_cache_dir is None:
+            return None
+
+        cache_dir = self.metadata_cache_dir / "opv2v_coop_scene_cache"
+        cache_key_payload = {
+            "version": 1,
+            "split": self.split,
+            "root": str(self.root),
+            "depth_root": str(self.depth_root),
+            "camera_ids": list(self.camera_ids),
+            "include_agents": sorted(self.include_agents) if self.include_agents else None,
+            "main_agent": self.main_agent,
+            "main_agent_policy": self.main_agent_policy,
+            "min_agents": self.min_agents,
+            "structured_sampling": self.structured_sampling,
+            "agents_per_sample": self.agents_per_sample,
+            "views_per_agent": self.views_per_agent,
+            "max_agent_distance": self.max_agent_distance,
+            "require_complete_rig": self.require_complete_rig,
+            "max_scenes": self.max_scenes,
+        }
+        cache_key = hashlib.sha1(
+            json.dumps(cache_key_payload, sort_keys=True).encode("utf-8")
+        ).hexdigest()[:16]
+        return cache_dir / f"{self.split}_{cache_key}.json"
+
+    def _rebuild_scene_records(self, raw_scenes: List[Dict]) -> List[Dict]:
+        scenes: List[Dict] = []
+        for item in raw_scenes:
+            sequence = item["sequence"]
+            agents = list(item["agents"])
+            scenes.append(
+                dict(
+                    sequence=sequence,
+                    frame=item["frame"],
+                    agents=agents,
+                    agent_dirs={agent_id: self.root / self.split / sequence / agent_id for agent_id in agents},
+                )
+            )
+        return scenes
+
+    def _load_cached_scenes(self) -> List[Dict] | None:
+        cache_path = self._scene_cache_path()
+        if cache_path is None or not cache_path.exists():
+            return None
+
+        try:
+            payload = json.loads(cache_path.read_text())
+            raw_scenes = payload.get("scenes", [])
+            if not raw_scenes:
+                return None
+            scenes = self._rebuild_scene_records(raw_scenes)
+            print(
+                f"OPV2VCoopDataset[{self.split}] loaded {len(scenes)} cached scenes from {cache_path}"
+            )
+            return scenes
+        except Exception as exc:
+            print(
+                f"OPV2VCoopDataset[{self.split}] failed to load cache {cache_path}: {exc}"
+            )
+            return None
+
+    def _save_cached_scenes(
+        self, scenes: List[Dict], raw_scene_count: int, dropped_scene_count: int
+    ) -> None:
+        cache_path = self._scene_cache_path()
+        if cache_path is None:
+            return
+
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "num_scenes": len(scenes),
+            "raw_scene_count": raw_scene_count,
+            "dropped_scene_count": dropped_scene_count,
+            "scenes": [
+                {
+                    "sequence": scene["sequence"],
+                    "frame": scene["frame"],
+                    "agents": list(scene["agents"]),
+                }
+                for scene in scenes
+            ],
+        }
+        tmp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
+        try:
+            tmp_path.write_text(json.dumps(payload, separators=(",", ":")))
+            os.replace(tmp_path, cache_path)
+            print(
+                f"OPV2VCoopDataset[{self.split}] wrote {len(scenes)} cached scenes to {cache_path}"
+            )
+        except Exception as exc:
+            print(
+                f"OPV2VCoopDataset[{self.split}] failed to write cache {cache_path}: {exc}"
+            )
+
     def _load_data(self):
         split_root = self.root / self.split
         if not split_root.exists():
             raise FileNotFoundError(f"Split directory not found: {split_root}")
+
+        cached_scenes = self._load_cached_scenes()
+        if cached_scenes is not None:
+            self.scenes = cached_scenes
+            self.num_of_scenes = len(cached_scenes)
+            return
 
         scenes: List[Dict] = []
         raw_scene_count = 0
@@ -332,6 +469,11 @@ class OPV2VCoopDataset(BaseDataset):
 
         self.scenes = scenes
         self.num_of_scenes = len(scenes)
+        self._save_cached_scenes(
+            scenes=scenes,
+            raw_scene_count=raw_scene_count,
+            dropped_scene_count=dropped_scene_count,
+        )
 
     def _target_agents_per_scene(self) -> int:
         if self.structured_sampling:
@@ -577,6 +719,7 @@ class OPV2VCoopDataset(BaseDataset):
         main_agent = self._choose_main_agent(agents)
         T_world_main = cords_to_pose(frame_meta_by_agent[main_agent]["lidar_pose"])
         T_main_world = np.linalg.inv(T_world_main)
+        vehicle_boxes = _get_vehicle_boxes_in_opencv(frame_meta_by_agent[main_agent])
 
         candidate_agents: List[Dict] = []
         available_entries: List[Dict] = []
@@ -651,6 +794,7 @@ class OPV2VCoopDataset(BaseDataset):
                 dataset=self.dataset_name,
                 label=os.path.join(sequence, main_agent),
                 instance=os.path.join(frame_id, f"{entry['cam_key']}_{entry['agent_id']}"),
+                vehicle_boxes=vehicle_boxes,
             )
             if self.emit_identity_metadata or self.structured_sampling:
                 view["agent_index"] = int(entry.get("agent_index", 0))

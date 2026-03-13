@@ -123,6 +123,8 @@ def get_vehicle_bboxes_in_ego(
 
         vehicle_bboxes[str(veh_id)] = {
             "center": bbox_center,
+            "rotation": T_ego_bbox[:3, :3].copy(),
+            "extent": extent.copy(),
             "corners": corners_ego,
         }
     return vehicle_bboxes
