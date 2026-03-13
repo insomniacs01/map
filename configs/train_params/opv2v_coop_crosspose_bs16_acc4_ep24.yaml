@@ -1,0 +1,6 @@
+defaults:
+  - opv2v_coop_crosspose_bs64_ep24
+
+max_num_of_imgs_per_gpu: 16
+max_num_of_test_imgs_per_gpu: 8
+accum_iter: 4

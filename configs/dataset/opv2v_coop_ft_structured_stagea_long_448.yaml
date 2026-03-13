@@ -1,0 +1,5 @@
+defaults:
+  - opv2v_coop_ft_structured_stagea_long
+
+resolution_train: ${dataset.resolution_options.448_1_77_ar}
+resolution_val: ${dataset.resolution_options.448_1_77_ar}
