@@ -43,9 +43,10 @@ def _convert_rotation_to_opencv(rotation: np.ndarray) -> np.ndarray:
 def _get_vehicle_boxes_in_opencv(frame_meta: Dict) -> List[Dict]:
     vehicle_bboxes = get_vehicle_bboxes_in_ego(frame_meta, max_range=None)
     vehicle_boxes = []
-    for bbox in vehicle_bboxes.values():
+    for vehicle_id, bbox in sorted(vehicle_bboxes.items(), key=lambda item: item[0]):
         vehicle_boxes.append(
             {
+                "vehicle_id": str(vehicle_id),
                 "center": _convert_points_to_opencv(
                     np.asarray(bbox["center"], dtype=np.float32)
                 ).astype(np.float32),

@@ -29,22 +29,36 @@ from mapanything.utils.geometry import (
 from uniception.models.encoders.image_normalizations import IMAGE_NORMALIZATION_DICT
 
 
-def _compute_vehicle_mask_from_boxes(pts3d: np.ndarray, vehicle_boxes) -> np.ndarray:
+def _compute_vehicle_mask_and_ids_from_boxes(
+    pts3d: np.ndarray, vehicle_boxes
+) -> tuple[np.ndarray, np.ndarray]:
+    shape_hw = pts3d.shape[:2]
     if not vehicle_boxes:
-        return np.zeros(pts3d.shape[:2], dtype=bool)
+        return (
+            np.zeros(shape_hw, dtype=bool),
+            np.zeros(shape_hw, dtype=np.int32),
+        )
 
     flat_pts = pts3d.reshape(-1, 3)
     vehicle_mask = np.zeros(flat_pts.shape[0], dtype=bool)
-    for box in vehicle_boxes:
+    vehicle_instance_ids = np.zeros(flat_pts.shape[0], dtype=np.int32)
+    for box_idx, box in enumerate(vehicle_boxes, start=1):
         center = np.asarray(box["center"], dtype=np.float32)
         rotation = np.asarray(box["rotation"], dtype=np.float32)
         extent = np.asarray(box["extent"], dtype=np.float32)
         if center.shape != (3,) or rotation.shape != (3, 3) or extent.shape != (3,):
             continue
         local_pts = (flat_pts - center[None, :]) @ rotation
-        vehicle_mask |= np.all(np.abs(local_pts) <= (extent[None, :] + 1.0e-4), axis=-1)
+        inside = np.all(np.abs(local_pts) <= (extent[None, :] + 1.0e-4), axis=-1)
+        if not bool(np.any(inside)):
+            continue
+        vehicle_mask |= inside
+        vehicle_instance_ids[inside & (vehicle_instance_ids == 0)] = int(box_idx)
 
-    return vehicle_mask.reshape(pts3d.shape[:2])
+    return (
+        vehicle_mask.reshape(shape_hw),
+        vehicle_instance_ids.reshape(shape_hw),
+    )
 
 
 class BaseDataset(EasyDataset):
@@ -562,12 +576,16 @@ class BaseDataset(EasyDataset):
             view["pts3d_cam"] = pts3d_cam
 
             if "vehicle_boxes" in view:
-                vehicle_mask = _compute_vehicle_mask_from_boxes(
+                vehicle_mask, vehicle_instance_ids = _compute_vehicle_mask_and_ids_from_boxes(
                     view["pts3d"], view["vehicle_boxes"]
                 )
-                view["vehicle_mask"] = (vehicle_mask & view["valid_mask"]).astype(
+                vehicle_mask = vehicle_mask & view["valid_mask"]
+                view["vehicle_mask"] = vehicle_mask.astype(
                     view["valid_mask"].dtype
                 )
+                view["vehicle_instance_ids"] = (
+                    vehicle_instance_ids * vehicle_mask.astype(np.int32)
+                ).astype(np.int32)
                 del view["vehicle_boxes"]
 
             # Compute the prior depth along ray if present
@@ -609,6 +627,8 @@ class BaseDataset(EasyDataset):
                 assert view["depthmap"].shape == view["non_ambiguous_mask"].shape
             if "vehicle_mask" in view:
                 assert view["depthmap"].shape == view["vehicle_mask"].shape
+            if "vehicle_instance_ids" in view:
+                assert view["depthmap"].shape == view["vehicle_instance_ids"].shape
 
             # Expand the last dimension of the depthmap
             view["depthmap"] = view["depthmap"][..., None]

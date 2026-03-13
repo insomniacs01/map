@@ -120,6 +120,16 @@ class EvalResult:
     chamfer_filtered_gt_to_pred: float | None = None
     bev_iou_raw: float | None = None
     bev_iou_filtered: float | None = None
+    vehicle_union_chamfer_pred_to_gt: float | None = None
+    vehicle_union_chamfer_gt_to_pred: float | None = None
+    vehicle_union_bev_iou: float | None = None
+    vehicle_obj_chamfer_pred_to_gt: float | None = None
+    vehicle_obj_chamfer_gt_to_pred: float | None = None
+    vehicle_obj_bev_iou: float | None = None
+    vehicle_box_count: int | None = None
+    vehicle_box_supported_count: int | None = None
+    vehicle_box_pred_hit_count: int | None = None
+    vehicle_box_pred_hit_rate: float | None = None
     det_num_gt: int | None = None
     det_num_pred: int | None = None
     det_tp_iou: int | None = None
@@ -139,6 +149,8 @@ class PCMetricConfig:
     radius_max: float | None = None
     bev_range: float = 120.0
     bev_resolution: float = 0.5
+    vehicle_box_expand: float = 0.5
+    vehicle_min_points: int = 8
     save_dir: Path | None = None
 
 
@@ -323,6 +335,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pc_filter_radius", type=float, default=None, help="Radius threshold for filtered Chamfer/IoU")
     parser.add_argument("--pc_bev_range", type=float, default=120.0, help="BEV grid range for detection metrics")
     parser.add_argument("--pc_bev_resolution", type=float, default=0.5, help="BEV grid resolution for detection metrics")
+    parser.add_argument(
+        "--pc_vehicle_box_expand",
+        type=float,
+        default=0.5,
+        help="Expand each GT vehicle box by this many meters per side for vehicle-only geometry metrics",
+    )
+    parser.add_argument(
+        "--pc_vehicle_min_points",
+        type=int,
+        default=8,
+        help="Minimum GT points inside a vehicle box before it is counted in vehicle-only metrics",
+    )
     parser.add_argument("--pc_save_dir", type=Path, help="Optional directory to store per-frame predicted point clouds (.npy)")
     parser.add_argument("--det_metrics", action="store_true", help="Compute BEV 3D box detection metrics (AP/precision/recall)")
     parser.add_argument(
@@ -1258,19 +1282,20 @@ def _bev_iou(pred: np.ndarray, gt: np.ndarray) -> float:
     return float(np.logical_and(pred, gt).sum() / union)
 
 
+def _sample_points(points: np.ndarray, max_points: int = 200_000) -> np.ndarray:
+    if points.shape[0] <= max_points:
+        return points
+    idx = np.random.choice(points.shape[0], max_points, replace=False)
+    return points[idx]
+
+
 def compute_detection_metrics(
     pred_points: np.ndarray,
     gt_points: np.ndarray,
     config: PCMetricConfig,
 ) -> Dict[str, float]:
-    def _sample(points: np.ndarray, max_points: int = 200_000) -> np.ndarray:
-        if points.shape[0] <= max_points:
-            return points
-        idx = np.random.choice(points.shape[0], max_points, replace=False)
-        return points[idx]
-
-    pred_points_sample = _sample(pred_points)
-    gt_points_sample = _sample(gt_points)
+    pred_points_sample = _sample_points(pred_points)
+    gt_points_sample = _sample_points(gt_points)
 
     chamfer_pred_gt, chamfer_gt_pred = _chamfer_metrics(pred_points_sample, gt_points_sample)
     bev_pred = _bev_occupancy(pred_points, config.bev_range, config.bev_resolution)
@@ -1282,7 +1307,7 @@ def compute_detection_metrics(
     }
     if any(v is not None for v in (config.z_min, config.z_max, config.radius_max)):
         filtered = _filter_points(pred_points, config.z_min, config.z_max, config.radius_max)
-        filtered_sample = _sample(filtered)
+        filtered_sample = _sample_points(filtered)
         chamfer_f_pred_gt, chamfer_f_gt_pred = _chamfer_metrics(filtered_sample, gt_points_sample)
         bev_filtered = _bev_occupancy(filtered, config.bev_range, config.bev_resolution)
         metrics.update(
@@ -1300,6 +1325,123 @@ def compute_detection_metrics(
                 "bev_iou_filtered": float("nan"),
             }
         )
+    return metrics
+
+
+def _points_in_vehicle_box(
+    points: np.ndarray, box: np.ndarray, *, expand: float = 0.0
+) -> np.ndarray:
+    if points.size == 0:
+        return np.zeros((points.shape[0],), dtype=bool)
+
+    x, y, z, l, w, h, yaw = [float(v) for v in np.asarray(box).reshape(-1)[:7]]
+    center = np.array([x, y, z], dtype=np.float32)
+    c = math.cos(yaw)
+    s = math.sin(yaw)
+    rotation = np.array(
+        [[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32
+    )
+    extent = np.array([l, w, h], dtype=np.float32) * 0.5 + float(expand)
+    local_pts = (points.astype(np.float32, copy=False) - center[None, :]) @ rotation
+    return np.all(np.abs(local_pts) <= (extent[None, :] + 1.0e-4), axis=-1)
+
+
+def compute_vehicle_only_metrics(
+    pred_points: np.ndarray,
+    gt_points: np.ndarray,
+    gt_boxes: np.ndarray,
+    config: PCMetricConfig,
+) -> Dict[str, float]:
+    metrics = {
+        "vehicle_union_chamfer_pred_to_gt": float("nan"),
+        "vehicle_union_chamfer_gt_to_pred": float("nan"),
+        "vehicle_union_bev_iou": float("nan"),
+        "vehicle_obj_chamfer_pred_to_gt": float("nan"),
+        "vehicle_obj_chamfer_gt_to_pred": float("nan"),
+        "vehicle_obj_bev_iou": float("nan"),
+        "vehicle_box_count": 0,
+        "vehicle_box_supported_count": 0,
+        "vehicle_box_pred_hit_count": 0,
+        "vehicle_box_pred_hit_rate": float("nan"),
+    }
+    if gt_boxes.size == 0:
+        return metrics
+
+    box_expand = float(config.vehicle_box_expand)
+    min_points = max(1, int(config.vehicle_min_points))
+    pred_union_chunks: list[np.ndarray] = []
+    gt_union_chunks: list[np.ndarray] = []
+    obj_chamfer_pred_gt: list[float] = []
+    obj_chamfer_gt_pred: list[float] = []
+    obj_bev_iou: list[float] = []
+    supported_count = 0
+    pred_hit_count = 0
+
+    gt_boxes = np.asarray(gt_boxes, dtype=np.float32)
+    metrics["vehicle_box_count"] = int(gt_boxes.shape[0])
+    for box in gt_boxes:
+        gt_mask = _points_in_vehicle_box(gt_points, box, expand=box_expand)
+        gt_box_points = gt_points[gt_mask]
+        if gt_box_points.shape[0] < min_points:
+            continue
+
+        supported_count += 1
+        pred_mask = _points_in_vehicle_box(pred_points, box, expand=box_expand)
+        pred_box_points = pred_points[pred_mask]
+        gt_union_chunks.append(gt_box_points)
+        if pred_box_points.shape[0] > 0:
+            pred_union_chunks.append(pred_box_points)
+        if pred_box_points.shape[0] < min_points:
+            continue
+
+        pred_hit_count += 1
+        chamfer_pred_gt, chamfer_gt_pred = _chamfer_metrics(
+            _sample_points(pred_box_points, max_points=20_000),
+            _sample_points(gt_box_points, max_points=20_000),
+        )
+        obj_chamfer_pred_gt.append(chamfer_pred_gt)
+        obj_chamfer_gt_pred.append(chamfer_gt_pred)
+        obj_bev_iou.append(
+            _bev_iou(
+                _bev_occupancy(pred_box_points, config.bev_range, config.bev_resolution),
+                _bev_occupancy(gt_box_points, config.bev_range, config.bev_resolution),
+            )
+        )
+
+    metrics["vehicle_box_supported_count"] = int(supported_count)
+    metrics["vehicle_box_pred_hit_count"] = int(pred_hit_count)
+    if supported_count > 0:
+        metrics["vehicle_box_pred_hit_rate"] = float(pred_hit_count / supported_count)
+
+        pred_union = (
+            np.concatenate(pred_union_chunks, axis=0)
+            if pred_union_chunks
+            else np.zeros((0, 3), dtype=np.float32)
+        )
+        gt_union = (
+            np.concatenate(gt_union_chunks, axis=0)
+            if gt_union_chunks
+            else np.zeros((0, 3), dtype=np.float32)
+        )
+        union_chamfer_pred_gt, union_chamfer_gt_pred = _chamfer_metrics(
+            _sample_points(pred_union, max_points=50_000),
+            _sample_points(gt_union, max_points=50_000),
+        )
+        metrics["vehicle_union_chamfer_pred_to_gt"] = union_chamfer_pred_gt
+        metrics["vehicle_union_chamfer_gt_to_pred"] = union_chamfer_gt_pred
+        metrics["vehicle_union_bev_iou"] = _bev_iou(
+            _bev_occupancy(pred_union, config.bev_range, config.bev_resolution),
+            _bev_occupancy(gt_union, config.bev_range, config.bev_resolution),
+        )
+
+    if obj_chamfer_pred_gt:
+        metrics["vehicle_obj_chamfer_pred_to_gt"] = float(
+            np.mean(obj_chamfer_pred_gt)
+        )
+        metrics["vehicle_obj_chamfer_gt_to_pred"] = float(
+            np.mean(obj_chamfer_gt_pred)
+        )
+        metrics["vehicle_obj_bev_iou"] = float(np.mean(obj_bev_iou))
     return metrics
 
 
@@ -2026,22 +2168,39 @@ def evaluate_model_on_frames(
                 )
                 continue
 
-            det_num_gt = det_num_pred = det_tp = det_fp = det_fn = None
-            det_mean_iou = None
-            if use_det and det_metrics_cfg is not None:
-                frame_key = (info.sequence, info.frame)
-                yaml_path = images_root / split / info.sequence / info.main_agent / f"{info.frame}.yaml"
+            gt_boxes = np.zeros((0, 7), dtype=np.float32)
+            need_gt_boxes = bool(use_det) or bool(pc_metrics_cfg and pc_metrics_cfg.enabled)
+            if need_gt_boxes:
+                yaml_path = (
+                    images_root / split / info.sequence / info.main_agent / f"{info.frame}.yaml"
+                )
                 try:
                     frame_meta = load_frame_metadata(yaml_path)
                     gt_padded, gt_mask = _extract_vehicle_boxes_in_ego(
                         frame_meta,
-                        max_range=det_metrics_cfg.bbox_range,
-                        max_num_boxes=det_metrics_cfg.max_num_boxes,
+                        max_range=(
+                            float(det_metrics_cfg.bbox_range)
+                            if det_metrics_cfg is not None and det_metrics_cfg.bbox_range is not None
+                            else (
+                                float(pc_metrics_cfg.radius_max)
+                                if pc_metrics_cfg is not None and pc_metrics_cfg.radius_max is not None
+                                else 120.0
+                            )
+                        ),
+                        max_num_boxes=(
+                            int(det_metrics_cfg.max_num_boxes)
+                            if det_metrics_cfg is not None
+                            else 128
+                        ),
                     )
                     gt_boxes = gt_padded[gt_mask]
                 except Exception:  # noqa: BLE001
                     gt_boxes = np.zeros((0, 7), dtype=np.float32)
 
+            det_num_gt = det_num_pred = det_tp = det_fp = det_fn = None
+            det_mean_iou = None
+            if use_det and det_metrics_cfg is not None:
+                frame_key = (info.sequence, info.frame)
                 det_out = None
                 if predictions and isinstance(predictions[0], dict):
                     det_out = predictions[0].get("bev_det")
@@ -2114,6 +2273,7 @@ def evaluate_model_on_frames(
                 fallback_scale_factor=pred_scale_fallback,
             )
             detection_metrics = {}
+            vehicle_metrics = {}
             if pc_metrics_cfg:
                 if pred_points_carla is None:
                     raise RuntimeError(
@@ -2132,6 +2292,12 @@ def evaluate_model_on_frames(
                     else:
                         gt_points = load_ascii_pcd_xyz(gt_pcd_path)
                         detection_metrics = compute_detection_metrics(pred_points_carla, gt_points, pc_metrics_cfg)
+                        vehicle_metrics = compute_vehicle_only_metrics(
+                            pred_points_carla,
+                            gt_points,
+                            gt_boxes,
+                            pc_metrics_cfg,
+                        )
 
             per_mode_results[mode].append(
                 EvalResult(
@@ -2191,6 +2357,16 @@ def evaluate_model_on_frames(
                     chamfer_filtered_gt_to_pred=detection_metrics.get("chamfer_filtered_gt_to_pred"),
                     bev_iou_raw=detection_metrics.get("bev_iou_raw"),
                     bev_iou_filtered=detection_metrics.get("bev_iou_filtered"),
+                    vehicle_union_chamfer_pred_to_gt=vehicle_metrics.get("vehicle_union_chamfer_pred_to_gt"),
+                    vehicle_union_chamfer_gt_to_pred=vehicle_metrics.get("vehicle_union_chamfer_gt_to_pred"),
+                    vehicle_union_bev_iou=vehicle_metrics.get("vehicle_union_bev_iou"),
+                    vehicle_obj_chamfer_pred_to_gt=vehicle_metrics.get("vehicle_obj_chamfer_pred_to_gt"),
+                    vehicle_obj_chamfer_gt_to_pred=vehicle_metrics.get("vehicle_obj_chamfer_gt_to_pred"),
+                    vehicle_obj_bev_iou=vehicle_metrics.get("vehicle_obj_bev_iou"),
+                    vehicle_box_count=vehicle_metrics.get("vehicle_box_count"),
+                    vehicle_box_supported_count=vehicle_metrics.get("vehicle_box_supported_count"),
+                    vehicle_box_pred_hit_count=vehicle_metrics.get("vehicle_box_pred_hit_count"),
+                    vehicle_box_pred_hit_rate=vehicle_metrics.get("vehicle_box_pred_hit_rate"),
                     det_num_gt=det_num_gt,
                     det_num_pred=det_num_pred,
                     det_tp_iou=det_tp,
@@ -2404,6 +2580,16 @@ def summarize_results(results: Dict[str, List[EvalResult]]) -> Dict[str, Dict[st
             "chamfer_filtered_gt_to_pred_mean": _attr_mean("chamfer_filtered_gt_to_pred"),
             "bev_iou_raw_mean": _attr_mean("bev_iou_raw"),
             "bev_iou_filtered_mean": _attr_mean("bev_iou_filtered"),
+            "vehicle_union_chamfer_pred_to_gt_mean": _attr_mean("vehicle_union_chamfer_pred_to_gt"),
+            "vehicle_union_chamfer_gt_to_pred_mean": _attr_mean("vehicle_union_chamfer_gt_to_pred"),
+            "vehicle_union_bev_iou_mean": _attr_mean("vehicle_union_bev_iou"),
+            "vehicle_obj_chamfer_pred_to_gt_mean": _attr_mean("vehicle_obj_chamfer_pred_to_gt"),
+            "vehicle_obj_chamfer_gt_to_pred_mean": _attr_mean("vehicle_obj_chamfer_gt_to_pred"),
+            "vehicle_obj_bev_iou_mean": _attr_mean("vehicle_obj_bev_iou"),
+            "vehicle_box_count_mean": _attr_mean("vehicle_box_count"),
+            "vehicle_box_supported_count_mean": _attr_mean("vehicle_box_supported_count"),
+            "vehicle_box_pred_hit_count_mean": _attr_mean("vehicle_box_pred_hit_count"),
+            "vehicle_box_pred_hit_rate_mean": _attr_mean("vehicle_box_pred_hit_rate"),
         }
         if any(v.det_ap_iou is not None for v in values):
             summary[mode].update(
@@ -2471,6 +2657,16 @@ def save_metrics_csv(results: Dict[str, List[EvalResult]], out_dir: Path, model_
                     "chamfer_filtered_gt_to_pred",
                     "bev_iou_raw",
                     "bev_iou_filtered",
+                    "vehicle_union_chamfer_pred_to_gt",
+                    "vehicle_union_chamfer_gt_to_pred",
+                    "vehicle_union_bev_iou",
+                    "vehicle_obj_chamfer_pred_to_gt",
+                    "vehicle_obj_chamfer_gt_to_pred",
+                    "vehicle_obj_bev_iou",
+                    "vehicle_box_count",
+                    "vehicle_box_supported_count",
+                    "vehicle_box_pred_hit_count",
+                    "vehicle_box_pred_hit_rate",
                     "det_num_gt",
                     "det_num_pred",
                     "det_tp_iou",
@@ -2518,6 +2714,16 @@ def save_metrics_csv(results: Dict[str, List[EvalResult]], out_dir: Path, model_
                         f"{v.chamfer_filtered_gt_to_pred:.6f}" if v.chamfer_filtered_gt_to_pred is not None else "nan",
                         f"{v.bev_iou_raw:.6f}" if v.bev_iou_raw is not None else "nan",
                         f"{v.bev_iou_filtered:.6f}" if v.bev_iou_filtered is not None else "nan",
+                        f"{v.vehicle_union_chamfer_pred_to_gt:.6f}" if v.vehicle_union_chamfer_pred_to_gt is not None else "nan",
+                        f"{v.vehicle_union_chamfer_gt_to_pred:.6f}" if v.vehicle_union_chamfer_gt_to_pred is not None else "nan",
+                        f"{v.vehicle_union_bev_iou:.6f}" if v.vehicle_union_bev_iou is not None else "nan",
+                        f"{v.vehicle_obj_chamfer_pred_to_gt:.6f}" if v.vehicle_obj_chamfer_pred_to_gt is not None else "nan",
+                        f"{v.vehicle_obj_chamfer_gt_to_pred:.6f}" if v.vehicle_obj_chamfer_gt_to_pred is not None else "nan",
+                        f"{v.vehicle_obj_bev_iou:.6f}" if v.vehicle_obj_bev_iou is not None else "nan",
+                        str(v.vehicle_box_count) if v.vehicle_box_count is not None else "nan",
+                        str(v.vehicle_box_supported_count) if v.vehicle_box_supported_count is not None else "nan",
+                        str(v.vehicle_box_pred_hit_count) if v.vehicle_box_pred_hit_count is not None else "nan",
+                        f"{v.vehicle_box_pred_hit_rate:.6f}" if v.vehicle_box_pred_hit_rate is not None else "nan",
                         str(v.det_num_gt) if v.det_num_gt is not None else "nan",
                         str(v.det_num_pred) if v.det_num_pred is not None else "nan",
                         str(v.det_tp_iou) if v.det_tp_iou is not None else "nan",
@@ -2653,6 +2859,8 @@ def main() -> None:
         radius_max=args.pc_filter_radius,
         bev_range=args.pc_bev_range,
         bev_resolution=args.pc_bev_resolution,
+        vehicle_box_expand=float(args.pc_vehicle_box_expand),
+        vehicle_min_points=int(args.pc_vehicle_min_points),
         save_dir=args.pc_save_dir,
     )
 
@@ -2730,6 +2938,21 @@ def main() -> None:
             # When set, det_head weights are loaded from this checkpoint (composed eval).
             "det_head_ckpt": str(args.det_head_ckpt) if args.det_head_ckpt else None,
             "det_metrics": bool(det_cfg.enabled),
+            "pc_metrics": bool(pc_cfg.enabled),
+            "pc_metrics_cfg": (
+                {
+                    "z_min": float(pc_cfg.z_min) if pc_cfg.z_min is not None else None,
+                    "z_max": float(pc_cfg.z_max) if pc_cfg.z_max is not None else None,
+                    "radius_max": float(pc_cfg.radius_max) if pc_cfg.radius_max is not None else None,
+                    "bev_range": float(pc_cfg.bev_range),
+                    "bev_resolution": float(pc_cfg.bev_resolution),
+                    "vehicle_box_expand": float(pc_cfg.vehicle_box_expand),
+                    "vehicle_min_points": int(pc_cfg.vehicle_min_points),
+                    "save_dir": str(pc_cfg.save_dir) if pc_cfg.save_dir is not None else None,
+                }
+                if (pc_cfg.enabled or pc_cfg.save_dir is not None)
+                else None
+            ),
             "save_det_cache": bool(args.save_det_cache) if det_cfg.enabled else False,
             "det_decode_cfg": (
                 {

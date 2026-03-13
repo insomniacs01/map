@@ -910,6 +910,109 @@ class VehicleMaskedPointLoss(Criterion, MultiLoss):
         return total_loss, details
 
 
+class VehicleObjectBalancedPointLoss(Criterion, MultiLoss):
+    """Average vehicle point loss per object instead of per pixel."""
+
+    def __init__(
+        self,
+        criterion,
+        *,
+        instance_key: str = "vehicle_instance_ids",
+        pred_key: str = "pts3d_cam",
+        target_key: str = "pts3d_cam",
+        loss_in_log: bool = True,
+        min_pixels_per_instance: int = 4,
+    ):
+        super().__init__(criterion)
+        self.instance_key = str(instance_key)
+        self.pred_key = str(pred_key)
+        self.target_key = str(target_key)
+        self.loss_in_log = bool(loss_in_log)
+        self.min_pixels_per_instance = max(1, int(min_pixels_per_instance))
+
+    def get_name(self):
+        args = (
+            f"instance_key={self.instance_key},"
+            f"pred_key={self.pred_key},"
+            f"target_key={self.target_key},"
+            f"loss_in_log={self.loss_in_log},"
+            f"min_pixels_per_instance={self.min_pixels_per_instance}"
+        )
+        return f"{type(self).__name__}({self.criterion},{args})"
+
+    def compute_loss(self, batch, preds, **kw):
+        device = preds[0][self.pred_key].device
+        view_losses = []
+        total_vehicle_pixels = 0
+        total_instances = 0
+        total_instances_used = 0
+        details = {}
+        self_name = type(self).__name__
+
+        for view_idx, (gt, pred) in enumerate(zip(batch, preds)):
+            instance_ids = gt.get(self.instance_key)
+            if instance_ids is None:
+                continue
+
+            valid_mask = gt["valid_mask"].to(dtype=torch.bool)
+            object_ids = torch.unique(instance_ids[valid_mask])
+            object_ids = object_ids[object_ids > 0]
+            num_objects = int(object_ids.numel())
+            details[f"{self_name}_objects_view{view_idx + 1}"] = num_objects
+            total_instances += num_objects
+            if num_objects == 0:
+                details[f"{self_name}_pixels_view{view_idx + 1}"] = 0
+                details[f"{self_name}_objects_used_view{view_idx + 1}"] = 0
+                continue
+
+            object_losses = []
+            used_pixels = 0
+            for object_id in object_ids:
+                mask = (instance_ids == object_id) & valid_mask
+                pixel_count = int(mask.sum().item())
+                if pixel_count < self.min_pixels_per_instance:
+                    continue
+
+                pred_points = pred[self.pred_key][mask]
+                gt_points = gt[self.target_key][mask]
+                if self.loss_in_log:
+                    pred_points = apply_log_to_norm(pred_points)
+                    gt_points = apply_log_to_norm(gt_points)
+
+                loss = self.criterion(pred_points, gt_points, factor="points")
+                if loss.ndim > 0:
+                    loss = loss.mean()
+                object_losses.append(loss)
+                used_pixels += pixel_count
+
+            details[f"{self_name}_pixels_view{view_idx + 1}"] = used_pixels
+            details[f"{self_name}_objects_used_view{view_idx + 1}"] = int(
+                len(object_losses)
+            )
+            total_vehicle_pixels += used_pixels
+            total_instances_used += int(len(object_losses))
+            if not object_losses:
+                continue
+
+            view_loss = torch.stack(object_losses, dim=0).mean()
+            view_losses.append(view_loss)
+            details[f"{self_name}_view{view_idx + 1}"] = float(
+                view_loss.detach().cpu()
+            )
+
+        if view_losses:
+            total_loss = torch.stack(view_losses, dim=0).mean()
+        else:
+            total_loss = torch.zeros((), device=device)
+
+        details[f"{self_name}_avg"] = float(total_loss.detach().cpu())
+        details[f"{self_name}_valid_views"] = int(len(view_losses))
+        details[f"{self_name}_pixels_total"] = int(total_vehicle_pixels)
+        details[f"{self_name}_objects_total"] = int(total_instances)
+        details[f"{self_name}_objects_used_total"] = int(total_instances_used)
+        return total_loss, details
+
+
 class ConfLoss(MultiLoss):
     """
     Applies confidence-weighted regression loss using model-predicted confidence values.
